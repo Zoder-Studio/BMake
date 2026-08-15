@@ -1,0 +1,18 @@
+name: Test BMake Action
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run BMake Action
+        uses: Zoder-Studio/BMake@v1
+        with:
+          working-directory: .
