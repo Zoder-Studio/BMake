@@ -35,7 +35,8 @@ runs:
       run: cargo build --release --manifest-path "${{ github.action_path }}/Cargo.toml" -p bmake-cli
 
     - name: Check BMake
-      run: ls
+      shell: bash
+      run: ls | grep -name "bmake"
 
     - name: Run BMake
       shell: bash
