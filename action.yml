@@ -36,7 +36,7 @@ runs:
 
     - name: Check BMake
       shell: bash
-      run: ls | grep -name "bmake"
+      run: ls
 
     - name: Run BMake
       shell: bash
