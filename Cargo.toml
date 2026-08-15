@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/bmake-ast",
+    "crates/bmake-lexer",
+    "crates/bmake-parser",
+    "crates/bmake-engine",
+    "crates/bmake-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"

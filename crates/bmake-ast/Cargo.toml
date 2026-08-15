@@ -1,0 +1,4 @@
+[package]
+name = "bmake-ast"
+version.workspace = true
+edition.workspace = true

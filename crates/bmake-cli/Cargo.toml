@@ -1,0 +1,16 @@
+[package]
+name = "bmake-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bmake"
+path = "src/main.rs"
+
+[dependencies]
+bmake-ast = { path = "../bmake-ast" }
+bmake-lexer = { path = "../bmake-lexer" }
+bmake-parser = { path = "../bmake-parser" }
+bmake-engine = { path = "../bmake-engine" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

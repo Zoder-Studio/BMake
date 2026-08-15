@@ -1,0 +1,9 @@
+[package]
+name = "bmake-parser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bmake-ast = { path = "../bmake-ast" }
+bmake-lexer = { path = "../bmake-lexer" }
+anyhow = "1"
