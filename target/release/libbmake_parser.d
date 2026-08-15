@@ -1,1 +1,0 @@
-/data/data/com.termux/files/home/BMake/target/release/libbmake_parser.rlib: /data/data/com.termux/files/home/BMake/crates/bmake-ast/src/lib.rs /data/data/com.termux/files/home/BMake/crates/bmake-lexer/src/lib.rs /data/data/com.termux/files/home/BMake/crates/bmake-parser/src/lib.rs

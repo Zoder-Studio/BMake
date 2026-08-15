@@ -1,4 +1,5 @@
-use anyhow::{bail, Result};
+use std::path::Path;
+use anyhow::{bail, Result, Context};
 use bmake_ast::*;
 
 pub fn parse(input: &str) -> Result<BMakeFile> {
@@ -113,6 +114,24 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
         bail!("Unrecognized syntax at line {}: '{}'", i + 1, t);
     }
 
+    Ok(file)
+}
+
+pub fn parse_file(path: &Path) -> Result<BMakeFile> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut file = parse(&content).with_context(|| format!("Failed to parse {}", path.display()))?;
+
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let includes = std::mem::take(&mut file.includes);
+
+    for inc in &includes {
+        let inc_path = base_dir.join(inc);
+        let included = parse_file(&inc_path).with_context(|| format!("Failed to include {}", inc_path.display()))?;
+        merge_into(&mut file, included);
+    }
+
+    file.includes = includes;
     Ok(file)
 }
 
@@ -247,4 +266,43 @@ fn parse_multiline_command(lines: &[String], start: usize) -> Result<(String, us
     }
 
     bail!("Unterminated multiline Command block")
+}
+
+fn merge_into(target: &mut BMakeFile, other: BMakeFile) {
+    if target.lang.is_none() {
+        target.lang = other.lang;
+    }
+    if target.system.is_none() {
+        target.system = other.system;
+    }
+    if target.sub_system.is_none() {
+        target.sub_system = other.sub_system;
+    }
+    if target.platform.is_none() {
+        target.platform = other.platform;
+    }
+    if target.arch.is_none() {
+        target.arch = other.arch;
+    }
+    if target.directory.is_none() {
+        target.directory = other.directory;
+    }
+    if target.source.is_none() {
+        target.source = other.source;
+    }
+    if target.output.is_none() {
+        target.output = other.output;
+    }
+    if target.profile.is_none() {
+        target.profile = other.profile;
+    }
+    target.cache = target.cache || other.cache;
+    target.parallel = target.parallel || other.parallel;
+    target.dependencies.extend(other.dependencies);
+    target.requires.extend(other.requires);
+    target.plugins.extend(other.plugins);
+    for (k, v) in other.env {
+        target.env.entry(k).or_insert(v);
+    }
+    target.tasks.extend(other.tasks);
 }

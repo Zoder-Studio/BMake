@@ -30,17 +30,17 @@ pub fn ensure_dependencies(deps: &[Dependency]) -> Result<()> {
         }
 
         let Some(pm) = detect_package_manager() else {
-            bail!(" No package manager is recognized to install '{}'", dep.need);
+            bail!(" No recognized package manager found to install '{}'", dep.need);
         };
 
-        println!(" Install Dependency '{}' via {}...", dep.need, pm);
+        println!(" Installing dependency '{}' via {}...", dep.need, pm);
         let status = match pm {
             "pkg" => Command::new("pkg").args(["install", "-y", &dep.need]).status()?,
             "apt-get" | "apt" => Command::new("sudo").args([pm, "install", "-y", &dep.need]).status()?,
             "brew" => Command::new("brew").args(["install", &dep.need]).status()?,
             "dnf" => Command::new("sudo").args(["dnf", "install", "-y", &dep.need]).status()?,
             "pacman" => Command::new("sudo").args(["pacman", "-S", "--noconfirm", &dep.need]).status()?,
-            _ => bail!("Package manager is not supported: {}", pm),
+            _ => bail!("Unsupported package manager: {}", pm),
         };
 
         if !status.success() {

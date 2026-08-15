@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
-use bmake_engine::{dependency, executor, paths::BMakePaths, status::BuildStatus, version};
+use anyhow::Result;
+use bmake_engine::{dependency, executor, paths::BMakePaths, plugin, status::BuildStatus, version};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -66,17 +66,16 @@ fn find_bm_file(explicit: Option<PathBuf>) -> Result<PathBuf> {
         .collect();
 
     match candidates.len() {
-        0 => anyhow::bail!("No '.bm' files were found in this directory."),
+        0 => anyhow::bail!("No '.bm' file found in this directory"),
         1 => Ok(candidates.remove(0)),
-        _ => anyhow::bail!("More than one '.bm' file was found. Run: bmake run <file>.bm"),
+        _ => anyhow::bail!("Multiple '.bm' files found. Run: bmake run <file>.bm"),
     }
 }
 
 fn cmd_run(file: Option<PathBuf>) -> Result<()> {
     let bm_path = find_bm_file(file)?;
     let project_dir = bm_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let content = std::fs::read_to_string(&bm_path).with_context(|| format!("Failed to Read {}", bm_path.display()))?;
-    let bmake_file = bmake_parser::parse(&content).with_context(|| format!("Parsing failed {}", bm_path.display()))?;
+    let bmake_file = bmake_parser::parse_file(&bm_path)?;
 
     println!(" BMake {} — {}", bmake_file.version, bm_path.display());
 
@@ -85,13 +84,17 @@ fn cmd_run(file: Option<PathBuf>) -> Result<()> {
 
     if bmake_file.version != version::CURRENT_ENGINE_VERSION {
         version::ensure_engine(&paths, &bmake_file.version)?;
-        println!(" (Engine version is different from active CLI — in this phase the execution still uses CLI logic running)");
+        println!(" (Requested engine version differs from the running CLI — execution still uses this CLI's logic for now)");
     }
 
     dependency::ensure_requires(&bmake_file.requires)?;
     dependency::ensure_dependencies(&bmake_file.dependencies)?;
 
-    let status = executor::run_all_tasks(&bmake_file, &project_dir)?;
+    let status = executor::run_all_tasks(&bmake_file, &project_dir, &paths)?;
+
+    if status == BuildStatus::Success {
+        plugin::run_after_build(&bmake_file, &project_dir)?;
+    }
 
     match status {
         BuildStatus::Success => println!("\n BUILD SUCCESS"),
@@ -105,10 +108,10 @@ fn cmd_run(file: Option<PathBuf>) -> Result<()> {
 fn cmd_init() -> Result<()> {
     let path = PathBuf::from("BMake.bm");
     if path.exists() {
-        anyhow::bail!(" BMake.bm already exists in this directory");
+        anyhow::bail!("BMake.bm already exists in this directory");
     }
     let template = format!(
-        "<Version: {}>\n\nStart\n\nLang = Kotlin\nSystem = Gradle\n\n<Task: Build>\n    Command = ./gradlew build\n</Task>\n\nStop",
+        "<Version: {}>\n\nStart\n\nLang = Kotlin\nSystem = Gradle\n\n<Task: Build>\n    Command = ./gradlew build\n</Task>\n\nStop\n",
         version::CURRENT_ENGINE_VERSION
     );
     std::fs::write(&path, template)?;
@@ -118,9 +121,8 @@ fn cmd_init() -> Result<()> {
 
 fn cmd_check(file: Option<PathBuf>) -> Result<()> {
     let bm_path = find_bm_file(file)?;
-    let content = std::fs::read_to_string(&bm_path)?;
-    let bmake_file = bmake_parser::parse(&content)?;
-    println!(" {} valid", bm_path.display());
+    let bmake_file = bmake_parser::parse_file(&bm_path)?;
+    println!(" {} is valid", bm_path.display());
     println!("   Version : {}", bmake_file.version);
     println!("   Lang    : {:?}", bmake_file.lang);
     println!("   System  : {:?}", bmake_file.system);
@@ -136,14 +138,14 @@ fn cmd_clean() -> Result<()> {
         std::fs::remove_dir_all(&paths.root)?;
         println!(" Cleaned: {}", paths.root.display());
     } else {
-        println!(" There is no .bmake/ to clean up.");
+        println!(" No .bmake/ directory to clean");
     }
     Ok(())
 }
 
 fn cmd_migrate() -> Result<()> {
     println!(" BMake Migration Notes");
-    println!(" Engine currently active: {}", version::CURRENT_ENGINE_VERSION);
+    println!(" Currently running engine: {}", version::CURRENT_ENGINE_VERSION);
     println!(" Migration notes between versions will be added as new versions are released.");
     Ok(())
 }
@@ -152,7 +154,7 @@ fn cmd_login() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let paths = BMakePaths::new(&cwd);
     paths.ensure_all()?;
-    println!(" Enter BMake Account token (from https://Zoder-Studio.github.io/BMake/):");
+    println!(" Enter your BMake Account token (from https://Zoder-Studio.github.io/BMake/):");
     let mut token = String::new();
     std::io::stdin().read_line(&mut token)?;
     let token = token.trim();
@@ -160,7 +162,7 @@ fn cmd_login() -> Result<()> {
         anyhow::bail!("Token cannot be empty");
     }
     std::fs::write(paths.credentials(), format!("token = \"{}\"\n", token))?;
-    println!(" Login successful. Token is stored in {}", paths.credentials().display());
+    println!(" Login successful. Token stored at {}", paths.credentials().display());
     Ok(())
 }
 
@@ -169,9 +171,9 @@ fn cmd_logout() -> Result<()> {
     let paths = BMakePaths::new(&cwd);
     if paths.credentials().exists() {
         std::fs::remove_file(paths.credentials())?;
-        println!(" Logout successful");
+        println!(" Logged out");
     } else {
-        println!(" Not logged in yet");
+        println!(" Not logged in");
     }
     Ok(())
 }
