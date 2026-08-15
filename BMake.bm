@@ -1,0 +1,16 @@
+<Version: 1.0>
+
+Start
+
+Lang = Rust
+System = Cargo
+
+<Task: Build>
+    Command = cargo build --release --workspace
+</Task>
+
+<Task: Test>
+    Command = cargo test --workspace
+</Task>
+
+Stop

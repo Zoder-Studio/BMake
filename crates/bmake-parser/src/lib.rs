@@ -30,10 +30,11 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
             i += 1;
             continue;
         }
-        if t == "Start" {
-            found_start = true;
-            i += 1;
+        if t != "Start" {
+            bail!("Expected 'Start' after Version tag at line {}", i + 1);
         }
+        found_start = true;
+        i += 1;
         break;
     }
     if !found_start {

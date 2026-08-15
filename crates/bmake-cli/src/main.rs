@@ -66,7 +66,9 @@ fn find_bm_file(explicit: Option<PathBuf>) -> Result<PathBuf> {
         .collect();
 
     match candidates.len() {
-        0 => anyhow::bail!("No '.bm' file found in this directory"),
+        0 => anyhow::bail!(
+            "No '.bm' file found in this directory. Run 'bmake init' to create one, or pass a path: bmake run <file>.bm"
+        ),
         1 => Ok(candidates.remove(0)),
         _ => anyhow::bail!("Multiple '.bm' files found. Run: bmake run <file>.bm"),
     }
