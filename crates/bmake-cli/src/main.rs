@@ -1,3 +1,4 @@
+use serde_json::json;
 use anyhow::Result;
 use bmake_engine::{dependency, executor, paths::BMakePaths, plugin, status::BuildStatus, version};
 use clap::{Parser, Subcommand};
@@ -142,6 +143,38 @@ fn cmd_run(file: Option<PathBuf>, verbose: bool, debug: bool, force: bool) -> Re
 
     println!(" BMake {} — {}", bmake_file.version, bm_path.display());
 
+    // Cloud dispatch takes over entirely when Remote: Local matches an
+    // online cloud Runner — execution happens on that other machine, so we
+    // hand off and exit before touching any local build state.
+    if bmake_file.remote.as_deref() == Some("Local") {
+        if let Ok(Some(session)) = bmake_engine::cloud::load_session() {
+            let runs_on = bmake_file
+                .runs_on
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Remote: Local requires 'Runs-on:' to be set"))?;
+            let matched = bmake_engine::cloud::find_matching_runner(
+                &session,
+                &runs_on,
+                bmake_file.runs_on_version.as_deref(),
+                bmake_file.arch.as_deref(),
+            )?;
+            if let Some(runner) = matched {
+                let raw_content = std::fs::read_to_string(&bm_path)?;
+                let exit_code = dispatch_cloud_job(&session, &runner, &raw_content)?;
+                std::process::exit(exit_code);
+            }
+            anyhow::bail!(
+                "No online cloud Runner found matching Runs-on: {} version: {:?} Arch: {:?}. Register one with 'bmake runner register' and bring it online with 'bmake runner start <id>'.",
+                runs_on,
+                bmake_file.runs_on_version,
+                bmake_file.arch
+            );
+        }
+        handle_remote_local_fallback(&bmake_file)?;
+    } else if let Some(remote) = bmake_file.remote.clone() {
+        handle_remote(&remote, &bmake_file)?;
+    }
+
     let paths = BMakePaths::new(&project_dir);
     paths.ensure_all()?;
 
@@ -155,7 +188,7 @@ fn cmd_run(file: Option<PathBuf>, verbose: bool, debug: bool, force: bool) -> Re
     }
 
     dependency::ensure_requires(&bmake_file.requires)?;
-    dependency::ensure_dependencies(&bmake_file.dependencies)?;
+    dependency::ensure_dependencies(&bmake_file.dependencies, &paths)?;
     dependency::ensure_tools(&bmake_file.tools, &paths)?;
 
     write_lockfile(&bmake_file, &paths)?;
@@ -205,33 +238,78 @@ fn cmd_run(file: Option<PathBuf>, verbose: bool, debug: bool, force: bool) -> Re
     std::process::exit(status.exit_code());
 }
 
-fn handle_remote(remote: &str, bmake_file: &bmake_ast::BMakeFile) -> Result<()> {
+fn handle_remote(remote: &str, _bmake_file: &bmake_ast::BMakeFile) -> Result<()> {
     match remote {
-        "Local" => {
-            let runs_on = bmake_file
-                .runs_on
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("Remote: Local requires 'Runs-on:' to be set"))?;
-            let matched = bmake_engine::runner::find_match(
-                &runs_on,
-                bmake_file.runs_on_version.as_deref(),
-                bmake_file.arch.as_deref(),
-            )?;
-            match matched {
-                Some(r) => println!(" Matched runner '{}' ({}) — executing here (no network dispatch yet)", r.name, r.id),
-                None => anyhow::bail!(
-                    "No online Runner found matching Runs-on: {} version: {:?} Arch: {:?}. Register one with 'bmake runner register' and bring it online with 'bmake runner start <id>'.",
-                    runs_on,
-                    bmake_file.runs_on_version,
-                    bmake_file.arch
-                ),
-            }
-        }
-        "CI" => println!(" Remote: CI requested — the BMake control plane/website is not available yet; running locally as a fallback."),
+        "CI" => println!(" Remote: CI requested — the control plane doesn't run CI jobs directly yet (only Runner dispatch is implemented); running locally as a fallback."),
         "Auto" => {}
         other => anyhow::bail!("Unknown Remote value '{}'", other),
     }
     Ok(())
+}
+
+fn handle_remote_local_fallback(bmake_file: &bmake_ast::BMakeFile) -> Result<()> {
+    let runs_on = bmake_file
+        .runs_on
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Remote: Local requires 'Runs-on:' to be set"))?;
+    let matched = bmake_engine::runner::find_match(
+        &runs_on,
+        bmake_file.runs_on_version.as_deref(),
+        bmake_file.arch.as_deref(),
+    )?;
+    match matched {
+        Some(r) => println!(
+            " Matched local runner '{}' ({}) — not logged in to BMake cloud, executing here (single-machine mode)",
+            r.name, r.id
+        ),
+        None => anyhow::bail!(
+            "No online Runner found matching Runs-on: {} version: {:?} Arch: {:?}. Register one with 'bmake runner register', or 'bmake login' to use cloud Runners.",
+            runs_on,
+            bmake_file.runs_on_version,
+            bmake_file.arch
+        ),
+    }
+    Ok(())
+}
+
+fn dispatch_cloud_job(session: &bmake_engine::cloud::Session, runner: &serde_json::Value, bm_content: &str) -> Result<i32> {
+    let runner_id = runner["id"].as_str().unwrap_or_default().to_string();
+    let runner_name = runner["name"].as_str().unwrap_or_default().to_string();
+    println!(" Matched cloud runner '{}' ({}) — dispatching job...", runner_name, runner_id);
+
+    let build_id = bmake_engine::cloud::create_build(session, Some(&runner_id))?;
+    let job = bmake_engine::cloud::create_job(session, &runner_id, bm_content, Some(&build_id))?;
+    let job_id = job["id"].as_str().unwrap_or_default().to_string();
+    if job_id.is_empty() {
+        anyhow::bail!("Job creation did not return an id");
+    }
+    println!(" Job {} queued for build {} — waiting for the runner to pick it up...", job_id, build_id);
+
+    let mut seen = 0usize;
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        let logs = bmake_engine::cloud::fetch_logs_since(session, &build_id, seen)?;
+        for line in &logs {
+            println!("{}", line);
+        }
+        seen += logs.len();
+
+        let Some(job_status) = bmake_engine::cloud::get_job(session, &job_id)? else {
+            anyhow::bail!("Job {} disappeared", job_id);
+        };
+        match job_status["status"].as_str().unwrap_or("PENDING") {
+            "SUCCESS" => {
+                println!("\n BUILD SUCCESS (remote runner '{}')", runner_name);
+                return Ok(0);
+            }
+            "FAILED" | "CANCELLED" => {
+                println!("\n BUILD FAILED (remote runner '{}')", runner_name);
+                return Ok(1);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn write_lockfile(file: &bmake_ast::BMakeFile, paths: &BMakePaths) -> Result<()> {
@@ -337,30 +415,26 @@ fn cmd_migrate() -> Result<()> {
 }
 
 fn cmd_login() -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let paths = BMakePaths::new(&cwd);
-    paths.ensure_all()?;
-    println!(" Enter your BMake Account token (from https://Zoder-Studio.github.io/BMake/):");
-    let mut token = String::new();
-    std::io::stdin().read_line(&mut token)?;
-    let token = token.trim();
-    if token.is_empty() {
-        anyhow::bail!("Token cannot be empty");
-    }
-    std::fs::write(paths.credentials(), format!("token = \"{}\"\n", token))?;
-    println!(" Login successful. Token stored at {}", paths.credentials().display());
+    let supabase_url = std::env::var("BMAKE_SUPABASE_URL")
+        .map_err(|_| anyhow::anyhow!("BMAKE_SUPABASE_URL is not set. Point it at your BMake control-plane Supabase project."))?;
+    let anon_key = std::env::var("BMAKE_SUPABASE_ANON_KEY")
+        .map_err(|_| anyhow::anyhow!("BMAKE_SUPABASE_ANON_KEY is not set. Point it at your BMake control-plane Supabase project."))?;
+
+    let email = prompt("Email")?;
+    print!(" Password: ");
+    std::io::stdout().flush()?;
+    let mut password = String::new();
+    std::io::stdin().read_line(&mut password)?;
+    let password = password.trim();
+
+    let session = bmake_engine::cloud::login(&supabase_url, &anon_key, &email, password)?;
+    println!(" Logged in as {} — session stored at ~/.bmake/credentials.toml", session.email);
     Ok(())
 }
 
 fn cmd_logout() -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let paths = BMakePaths::new(&cwd);
-    if paths.credentials().exists() {
-        std::fs::remove_file(paths.credentials())?;
-        println!(" Logged out");
-    } else {
-        println!(" Not logged in");
-    }
+    bmake_engine::cloud::clear_session()?;
+    println!(" Logged out");
     Ok(())
 }
 
@@ -376,30 +450,147 @@ fn cmd_runner_register() -> Result<()> {
     let runs_on = prompt("Runs-on (e.g. ubuntu, debian, android)")?;
     let version = prompt("version (e.g. 24.04)")?;
     let arch = prompt("Arch (e.g. x86_64, arm64)")?;
-    let runner = bmake_engine::runner::register(&name, &runs_on, &version, &arch)?;
-    println!(" Registered runner '{}' with ID {}", runner.name, runner.id);
-    println!(" Status: OFFLINE — run 'bmake runner start {}' to bring it online", runner.id);
-    Ok(())
-}
 
-fn prompt(label: &str) -> Result<String> {
-    print!(" {}: ", label);
-    std::io::stdout().flush()?;
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
+    if let Some(session) = bmake_engine::cloud::load_session()? {
+        let runner = bmake_engine::cloud::register_runner(&session, &name, &runs_on, &version, &arch)?;
+        let id = runner["id"].as_str().unwrap_or_default();
+        println!(" Registered cloud runner '{}' with ID {}", name, id);
+        println!(" Status: OFFLINE — run 'bmake runner start {}' to bring it online", id);
+    } else {
+        let runner = bmake_engine::runner::register(&name, &runs_on, &version, &arch)?;
+        println!(" Registered local runner '{}' with ID {}", runner.name, runner.id);
+        println!(" (Not logged in — this Runner only works in single-machine mode. Run 'bmake login' for cross-machine dispatch.)");
+        println!(" Status: OFFLINE — run 'bmake runner start {}' to bring it online", runner.id);
+    }
+    Ok(())
 }
 
 fn cmd_runner_start(id: &str) -> Result<()> {
-    bmake_engine::runner::set_status(id, bmake_engine::runner::RunnerStatus::Online)?;
-    println!(" Runner '{}' is now ONLINE", id);
+    let Some(session) = bmake_engine::cloud::load_session()? else {
+        bmake_engine::runner::set_status(id, bmake_engine::runner::RunnerStatus::Online)?;
+        println!(" Runner '{}' is now ONLINE (local-only — not logged in, so it can't receive jobs from other machines)", id);
+        return Ok(());
+    };
+
+    bmake_engine::cloud::set_runner_status(&session, id, "ONLINE")?;
+    println!(" Runner '{}' is now ONLINE and polling for jobs (Ctrl+C to stop)", id);
+
+    loop {
+        let jobs = bmake_engine::cloud::list_pending_jobs(&session, id)?;
+        for job in jobs {
+            let job_id = job["id"].as_str().unwrap_or_default().to_string();
+            if job_id.is_empty() {
+                continue;
+            }
+            if let Some(claimed) = bmake_engine::cloud::claim_job(&session, &job_id)? {
+                run_claimed_job(&session, id, &claimed)?;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
+fn run_claimed_job(session: &bmake_engine::cloud::Session, runner_id: &str, job: &serde_json::Value) -> Result<()> {
+    let job_id = job["id"].as_str().unwrap_or_default().to_string();
+    let build_id = job["build_id"].as_str().map(|s| s.to_string());
+    let bm_content = job["bm_content"].as_str().unwrap_or_default().to_string();
+
+    println!(" Claimed job {}", job_id);
+    bmake_engine::cloud::set_runner_status(session, runner_id, "BUSY")?;
+    bmake_engine::cloud::update_job_status(session, &job_id, "RUNNING")?;
+    if let Some(bid) = &build_id {
+        let _ = bmake_engine::cloud::update_build(session, bid, json!({ "status": "RUNNING" }));
+    }
+
+    let job_file = std::env::temp_dir().join(format!("bmake-job-{}.bm", job_id));
+    std::fs::write(&job_file, &bm_content)?;
+
+    let exe = std::env::current_exe()?;
+    let mut child = std::process::Command::new(&exe)
+        .args(["run", "--force"])
+        .arg(&job_file)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let stdout_handle = child.stdout.take().map(|s| {
+        let session = session.clone();
+        let build_id = build_id.clone();
+        std::thread::spawn(move || stream_and_upload(s, session, build_id))
+    });
+    let stderr_handle = child.stderr.take().map(|s| {
+        let session = session.clone();
+        let build_id = build_id.clone();
+        std::thread::spawn(move || stream_and_upload(s, session, build_id))
+    });
+
+    let status = child.wait()?;
+    if let Some(h) = stdout_handle {
+        let _ = h.join();
+    }
+    if let Some(h) = stderr_handle {
+        let _ = h.join();
+    }
+    let _ = std::fs::remove_file(&job_file);
+
+    let final_status = if status.success() { "SUCCESS" } else { "FAILED" };
+    bmake_engine::cloud::update_job_status(session, &job_id, final_status)?;
+    if let Some(bid) = &build_id {
+        let _ = bmake_engine::cloud::update_build(
+            session,
+            bid,
+            json!({ "status": final_status, "exit_code": status.code().unwrap_or(-1) }),
+        );
+    }
+    bmake_engine::cloud::set_runner_status(session, runner_id, "ONLINE")?;
+    println!(" Job {} finished: {}", job_id, final_status);
     Ok(())
 }
 
+fn stream_and_upload(reader: impl std::io::Read, session: bmake_engine::cloud::Session, build_id: Option<String>) {
+    use std::io::{BufRead, BufReader};
+    let mut buffered: Vec<String> = Vec::new();
+    for line in BufReader::new(reader).lines().flatten() {
+        println!("{}", line);
+        buffered.push(line);
+        if buffered.len() >= 20 {
+            if let Some(bid) = &build_id {
+                let _ = bmake_engine::cloud::append_log(&session, bid, &buffered);
+            }
+            buffered.clear();
+        }
+    }
+    if !buffered.is_empty() {
+        if let Some(bid) = &build_id {
+            let _ = bmake_engine::cloud::append_log(&session, bid, &buffered);
+        }
+    }
+}
+
 fn cmd_runner_status() -> Result<()> {
+    if let Some(session) = bmake_engine::cloud::load_session()? {
+        let runners = bmake_engine::cloud::list_runners(&session)?;
+        if runners.is_empty() {
+            println!(" No cloud runners registered. Use 'bmake runner register' to add one.");
+            return Ok(());
+        }
+        for r in runners {
+            println!(
+                " {} [{}]  Runs-on: {} version: {} Arch: {}  Status: {}",
+                r["id"].as_str().unwrap_or(""),
+                r["name"].as_str().unwrap_or(""),
+                r["runs_on"].as_str().unwrap_or(""),
+                r["version"].as_str().unwrap_or(""),
+                r["arch"].as_str().unwrap_or(""),
+                r["status"].as_str().unwrap_or(""),
+            );
+        }
+        return Ok(());
+    }
+
     let runners = bmake_engine::runner::load_all()?;
     if runners.is_empty() {
-        println!(" No runners registered. Use 'bmake runner register' to add one.");
+        println!(" No local runners registered. Use 'bmake runner register' to add one.");
         return Ok(());
     }
     for r in runners {

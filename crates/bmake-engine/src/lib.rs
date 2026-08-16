@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod cloud;
 pub mod dependency;
 pub mod executor;
 pub mod graph;

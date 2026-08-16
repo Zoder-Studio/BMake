@@ -7,8 +7,9 @@ edition.workspace = true
 bmake-ast = { path = "../bmake-ast" }
 bmake-parser = { path = "../bmake-parser" }
 anyhow = "1"
-reqwest = { version = "0.12", features = ["blocking"] }
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 which = "6"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"

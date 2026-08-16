@@ -1,6 +1,7 @@
 use crate::paths::BMakePaths;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use bmake_ast::{Dependency, ToolReq};
+use std::path::Path;
 use std::process::Command;
 
 pub fn check_require(name: &str) -> bool {
@@ -23,7 +24,13 @@ fn detect_package_manager() -> Option<&'static str> {
         .find(|pm| which::which(pm).is_ok())
 }
 
-pub fn ensure_dependencies(deps: &[Dependency]) -> Result<()> {
+/// Installs missing dependencies. For apt/pkg (Debian-family, including
+/// Termux) this is fully sandboxed: the package is downloaded and extracted
+/// into `.bmake/dependencies/<name>/` without touching the system, and its
+/// binaries are symlinked into `.bmake/tools/bin`. Other package managers
+/// don't have a safe rootless prefix-install path yet, so they fall back to
+/// a real system-wide install (clearly labeled as such in the output).
+pub fn ensure_dependencies(deps: &[Dependency], paths: &BMakePaths) -> Result<()> {
     for dep in deps {
         if which::which(&dep.need).is_ok() {
             println!(" Dependency OK: {} ({})", dep.name, dep.need);
@@ -34,18 +41,111 @@ pub fn ensure_dependencies(deps: &[Dependency]) -> Result<()> {
             bail!(" No recognized package manager found to install '{}'", dep.need);
         };
 
-        println!(" Installing dependency '{}' via {}...", dep.need, pm);
-        let status = match pm {
-            "pkg" => Command::new("pkg").args(["install", "-y", &dep.need]).status()?,
-            "apt-get" | "apt" => Command::new("sudo").args([pm, "install", "-y", &dep.need]).status()?,
-            "brew" => Command::new("brew").args(["install", &dep.need]).status()?,
-            "dnf" => Command::new("sudo").args(["dnf", "install", "-y", &dep.need]).status()?,
-            "pacman" => Command::new("sudo").args(["pacman", "-S", "--noconfirm", &dep.need]).status()?,
+        match pm {
+            "pkg" | "apt-get" | "apt" => install_deb_sandboxed(&dep.need, paths)?,
+            "brew" => {
+                println!(" Installing '{}' via brew (system-wide — brew has no sandboxed prefix install yet)...", dep.need);
+                let status = Command::new("brew").args(["install", &dep.need]).status()?;
+                if !status.success() {
+                    bail!(" Failed to install dependency '{}'", dep.need);
+                }
+            }
+            "dnf" => {
+                println!(" Installing '{}' via dnf (system-wide — sandboxed install not implemented for dnf yet)...", dep.need);
+                let status = Command::new("sudo").args(["dnf", "install", "-y", &dep.need]).status()?;
+                if !status.success() {
+                    bail!(" Failed to install dependency '{}'", dep.need);
+                }
+            }
+            "pacman" => {
+                println!(" Installing '{}' via pacman (system-wide — sandboxed install not implemented for pacman yet)...", dep.need);
+                let status = Command::new("sudo").args(["pacman", "-S", "--noconfirm", &dep.need]).status()?;
+                if !status.success() {
+                    bail!(" Failed to install dependency '{}'", dep.need);
+                }
+            }
             _ => bail!("Unsupported package manager: {}", pm),
-        };
+        }
+    }
+    Ok(())
+}
 
-        if !status.success() {
-            bail!(" Failed to install dependency '{}'", dep.need);
+fn install_deb_sandboxed(package: &str, paths: &BMakePaths) -> Result<()> {
+    let dep_dir = paths.dependencies().join(package);
+    std::fs::create_dir_all(&dep_dir)?;
+
+    let downloader = if which::which("apt-get").is_ok() { "apt-get" } else { "pkg" };
+    println!(" Downloading '{}' via '{} download' (sandboxed, no system install)...", package, downloader);
+
+    let download_dir = dep_dir.join("_download");
+    std::fs::create_dir_all(&download_dir)?;
+
+    let status = Command::new(downloader)
+        .args(["download", package])
+        .current_dir(&download_dir)
+        .status()
+        .with_context(|| format!("Failed to run '{} download {}'", downloader, package))?;
+
+    if !status.success() {
+        bail!(" Failed to download package '{}' via '{} download'", package, downloader);
+    }
+
+    let deb_file = std::fs::read_dir(&download_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.extension().map(|e| e == "deb").unwrap_or(false));
+
+    let Some(deb_file) = deb_file else {
+        bail!(" No .deb file was produced for package '{}'", package);
+    };
+
+    if which::which("dpkg-deb").is_err() {
+        bail!(" 'dpkg-deb' is required to extract sandboxed packages but was not found on PATH");
+    }
+
+    let extract_status = Command::new("dpkg-deb")
+        .args(["-x", deb_file.to_str().unwrap_or_default(), dep_dir.to_str().unwrap_or_default()])
+        .status()
+        .with_context(|| "Failed to run dpkg-deb -x")?;
+
+    if !extract_status.success() {
+        bail!(" Failed to extract '{}'", deb_file.display());
+    }
+
+    let _ = std::fs::remove_dir_all(&download_dir);
+    link_binaries_into_sandbox(&dep_dir, paths)?;
+
+    println!(" Dependency '{}' installed to {} (sandboxed)", package, dep_dir.display());
+    Ok(())
+}
+
+fn link_binaries_into_sandbox(extracted_root: &Path, paths: &BMakePaths) -> Result<()> {
+    let bin_dir = paths.tools().join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+
+    for candidate in ["usr/bin", "usr/sbin", "bin", "sbin"] {
+        let dir = extracted_root.join(candidate);
+        if !dir.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir)?.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            let link = bin_dir.join(name);
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::symlink;
+                let _ = std::fs::remove_file(&link);
+                let _ = symlink(&path, &link);
+            }
+            #[cfg(windows)]
+            {
+                let _ = std::fs::remove_file(&link);
+                let _ = std::fs::copy(&path, &link);
+            }
         }
     }
     Ok(())
@@ -53,7 +153,6 @@ pub fn ensure_dependencies(deps: &[Dependency]) -> Result<()> {
 
 /// Maps a BMake `Tool:` name to the package name a given package manager
 /// actually publishes it under, for the handful of tools where they diverge.
-/// Anything not listed falls back to the lowercased tool name.
 fn tool_package_name(pm: &str, tool: &str) -> String {
     let lower = tool.to_lowercase();
     match (pm, lower.as_str()) {
@@ -65,14 +164,14 @@ fn tool_package_name(pm: &str, tool: &str) -> String {
 }
 
 /// Checks whether `tools` are available, installing missing ones via the
-/// detected system package manager. Installed tools are also symlinked into
+/// detected system package manager. Installed tools are symlinked into
 /// `.bmake/tools/bin` so the sandboxed PATH picks them up on later runs.
 pub fn ensure_tools(tools: &[ToolReq], paths: &BMakePaths) -> Result<()> {
     for tool in tools {
         if let Ok(resolved) = which::which(&tool.name) {
             println!(" Tool OK: {} (requested {}) -> {}", tool.name, tool.need, resolved.display());
             check_tool_version(&tool.name, &tool.need);
-            link_into_sandbox(&tool.name, &resolved, paths);
+            link_tool_into_sandbox(&tool.name, &resolved, paths);
             continue;
         }
 
@@ -105,15 +204,15 @@ pub fn ensure_tools(tools: &[ToolReq], paths: &BMakePaths) -> Result<()> {
 
         println!(" Tool installed: {} (need {})", tool.name, tool.need);
         check_tool_version(&tool.name, &tool.need);
-        link_into_sandbox(&tool.name, &resolved, paths);
+        link_tool_into_sandbox(&tool.name, &resolved, paths);
     }
     Ok(())
 }
 
 /// Best-effort version confirmation by running `<tool> --version` and
 /// checking whether the requested version string shows up in the output.
-/// Not authoritative — output formats vary wildly between tools — so a
-/// mismatch is only a warning, never a hard failure.
+/// Not authoritative — output formats vary between tools — so a mismatch
+/// is only a warning, never a hard failure.
 fn check_tool_version(name: &str, need: &str) {
     let Ok(output) = Command::new(name).arg("--version").output() else {
         return;
@@ -133,7 +232,7 @@ fn check_tool_version(name: &str, need: &str) {
     }
 }
 
-fn link_into_sandbox(name: &str, resolved: &std::path::Path, paths: &BMakePaths) {
+fn link_tool_into_sandbox(name: &str, resolved: &Path, paths: &BMakePaths) {
     let bin_dir = paths.tools().join("bin");
     if std::fs::create_dir_all(&bin_dir).is_err() {
         return;
