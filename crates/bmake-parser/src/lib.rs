@@ -5,41 +5,20 @@ use std::path::Path;
 pub fn parse(input: &str) -> Result<BMakeFile> {
     let lines = bmake_lexer::to_lines(input);
     let n = lines.len();
-    let mut i = 0usize;
 
-    let mut version: Option<String> = None;
-    while i < n {
-        let t = lines[i].trim();
-        if t.is_empty() {
-            i += 1;
-            continue;
-        }
-        version = parse_version_tag(t);
-        if version.is_none() {
-            bail!("Expected '<Version: ...>' before Start at line {}", i + 1);
-        }
-        i += 1;
-        break;
+    let mut i = skip_blank(&lines, 0);
+    if i >= n {
+        bail!("Missing '<Version: ...>' tag");
     }
-    let version = version.ok_or_else(|| anyhow::anyhow!("Missing '<Version: ...>' tag"))?;
+    let version = parse_version_tag(lines[i].trim())
+        .ok_or_else(|| anyhow::anyhow!("Expected '<Version: ...>' before Start at line {}", i + 1))?;
+    i += 1;
 
-    let mut found_start = false;
-    while i < n {
-        let t = lines[i].trim();
-        if t.is_empty() {
-            i += 1;
-            continue;
-        }
-        if t != "Start" {
-            bail!("Expected 'Start' after Version tag at line {}", i + 1);
-        }
-        found_start = true;
-        i += 1;
-        break;
+    i = skip_blank(&lines, i);
+    if i >= n || lines[i].trim() != "Start" {
+        bail!("Expected 'Start' after Version tag at line {}", i + 1);
     }
-    if !found_start {
-        bail!("Missing 'Start' marker after Version tag");
-    }
+    i += 1;
 
     let mut file = BMakeFile {
         version,
@@ -149,6 +128,13 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
     }
 
     Ok(file)
+}
+
+fn skip_blank(lines: &[String], mut i: usize) -> usize {
+    while i < lines.len() && lines[i].trim().is_empty() {
+        i += 1;
+    }
+    i
 }
 
 fn parse_log_level(v: &str, line: usize) -> Result<LogLevel> {
@@ -339,8 +325,6 @@ fn parse_multiline_command(lines: &[String], start: usize) -> Result<(String, us
     bail!("Unterminated multiline Command block")
 }
 
-/// Parses a `.bm` file from disk and recursively merges `import = ...`
-/// directives, detecting circular imports along the way.
 pub fn parse_file(path: &Path) -> Result<BMakeFile> {
     let mut stack = Vec::new();
     parse_file_inner(path, &mut stack)
@@ -363,10 +347,6 @@ fn parse_file_inner(path: &Path, stack: &mut Vec<std::path::PathBuf>) -> Result<
     Ok(file)
 }
 
-/// Parses already-in-memory BMake DSL text (used directly for `.bm.kts`
-/// output, and internally by `parse_file`) and resolves any `import = ...`
-/// directives relative to `base_dir`, sharing the same circular-import
-/// guard as file-based parsing.
 fn parse_content_with_imports(content: &str, base_dir: &Path, stack: &mut Vec<std::path::PathBuf>) -> Result<BMakeFile> {
     let mut file = parse(content)?;
     let imports = std::mem::take(&mut file.imports);
@@ -382,10 +362,6 @@ fn parse_content_with_imports(content: &str, base_dir: &Path, stack: &mut Vec<st
     Ok(file)
 }
 
-/// Entry point for `.bm.kts`: takes the flattened BMake DSL text produced
-/// by running the transpiled Kotlin script and parses it exactly like a
-/// regular `.bm` file — including `import = ...` resolution — using
-/// `origin_path` only to seed the circular-import guard.
 pub fn parse_kts_output(flattened: &str, base_dir: &Path, origin_path: &Path) -> Result<BMakeFile> {
     let mut stack = vec![origin_path.canonicalize().unwrap_or_else(|_| origin_path.to_path_buf())];
     parse_content_with_imports(flattened, base_dir, &mut stack)
@@ -446,13 +422,6 @@ fn merge_into(target: &mut BMakeFile, other: BMakeFile) {
     target.tasks.extend(other.tasks);
 }
 
-/// Transpiles a `.bm.kts` source file into a runnable Kotlin script that,
-/// when executed, prints the equivalent flattened `.bm` text on stdout.
-/// Kotlin code (val/var/fun/class/object/if/else/for/while/braces/imports)
-/// passes through unchanged; every other line is treated as BMake DSL and
-/// is emitted via `println` inside a triple-quoted string, so `$variable`
-/// and `${expr}` Kotlin string templates keep working exactly as the spec
-/// describes (e.g. `Command: ./gradlew assemble$buildType`).
 pub fn transpile_kts_to_kotlin_script(source: &str) -> String {
     let mut out = String::new();
     for raw_line in source.lines() {
@@ -476,9 +445,6 @@ fn is_kotlin_control_line(t: &str) -> bool {
         return true;
     }
     if let Some(rest) = t.strip_prefix("import ") {
-        // Distinguishes a real Kotlin `import kotlin.math.max` from the
-        // BMake `import = file.bm` directive, which also starts with the
-        // word "import" but is followed by `=`.
         return !rest.trim_start().starts_with('=');
     }
     let prefixes = [

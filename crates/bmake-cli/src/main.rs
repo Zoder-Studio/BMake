@@ -1,7 +1,8 @@
-use serde_json::json;
+mod editor_setup;
 use anyhow::Result;
 use bmake_engine::{dependency, executor, paths::BMakePaths, plugin, status::BuildStatus, version};
 use clap::{Parser, Subcommand};
+use serde_json::json;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -14,38 +15,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the build defined in a .bm file
     Run {
         file: Option<PathBuf>,
         #[arg(long)]
         verbose: bool,
         #[arg(long)]
         debug: bool,
-        /// Ignore incremental build state and force every task to run
         #[arg(long)]
         force: bool,
     },
-    /// Create a new BMake.bm in the current directory
     Init {
         #[arg(long)]
         kts: bool,
     },
-    /// Validate a .bm file without running it
-    Check { file: Option<PathBuf> },
-    /// Remove the .bmake/ cache directory
+    Check {
+        file: Option<PathBuf>,
+    },
     Clean {
         #[arg(long)]
         deep: bool,
     },
-    /// Show migration notes between BMake versions
     Migrate,
-    /// Authenticate with the BMake website
     Login,
-    /// Remove stored BMake credentials
     Logout,
-    /// Show the current BMake Engine version
     Version,
-    /// Manage BMake Runners
     Runner {
         #[command(subcommand)]
         action: RunnerAction,
@@ -54,11 +47,8 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum RunnerAction {
-    /// Register a new Runner in the local registry
     Register,
-    /// Mark a Runner as ONLINE
     Start { id: String },
-    /// List registered Runners and their status
     Status,
 }
 
@@ -143,9 +133,6 @@ fn cmd_run(file: Option<PathBuf>, verbose: bool, debug: bool, force: bool) -> Re
 
     println!(" BMake {} — {}", bmake_file.version, bm_path.display());
 
-    // Cloud dispatch takes over entirely when Remote: Local matches an
-    // online cloud Runner — execution happens on that other machine, so we
-    // hand off and exit before touching any local build state.
     if bmake_file.remote.as_deref() == Some("Local") {
         if let Ok(Some(session)) = bmake_engine::cloud::load_session() {
             let runs_on = bmake_file
@@ -181,10 +168,6 @@ fn cmd_run(file: Option<PathBuf>, verbose: bool, debug: bool, force: bool) -> Re
     if bmake_file.version != version::CURRENT_ENGINE_VERSION {
         version::ensure_engine(&paths, &bmake_file.version)?;
         println!(" (Requested engine version differs from the running CLI — execution still uses this CLI's logic for now)");
-    }
-
-    if let Some(remote) = bmake_file.remote.clone() {
-        handle_remote(&remote, &bmake_file)?;
     }
 
     dependency::ensure_requires(&bmake_file.requires)?;
@@ -339,7 +322,7 @@ fn cmd_init(kts: bool) -> Result<()> {
         anyhow::bail!("{} already exists in this directory", filename);
     }
     let template = format!(
-        "<Version: {}>\n\nStart\n\nLang: Kotlin\nSystem: Gradle\n\n<Task: Build>\n    Command: ./gradlew build\n</Task>\n\nStop",
+        "<Version: {}>\n\nStart\n\nLang: Kotlin\nSystem: Gradle\n\n<Task: Build>\n    Command: ./gradlew build\n</Task>\n\nStop\n",
         version::CURRENT_ENGINE_VERSION
     );
     std::fs::write(&path, template)?;
@@ -347,6 +330,7 @@ fn cmd_init(kts: bool) -> Result<()> {
     if kts {
         println!(" This file runs through the Kotlin scripting runtime — add val/if/for as needed, or leave it as plain BMake DSL.");
     }
+    editor_setup::detect_and_setup();
     Ok(())
 }
 
@@ -442,6 +426,14 @@ fn cmd_version() -> Result<()> {
     println!("BMake Engine {}", version::CURRENT_ENGINE_VERSION);
     println!("Platform: {} / Arch: {}", version::target_platform(), version::target_arch());
     Ok(())
+}
+
+fn prompt(label: &str) -> Result<String> {
+    print!(" {}: ", label);
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
 }
 
 fn cmd_runner_register() -> Result<()> {

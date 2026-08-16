@@ -1,0 +1,127 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "BMake",
+  "scopeName": "source.bmake",
+  "fileTypes": ["bm"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#version-tag" },
+    { "include": "#section-keywords" },
+    { "include": "#task-tag" },
+    { "include": "#import-statement" },
+    { "include": "#command-block" },
+    { "include": "#command-directive" },
+    { "include": "#dependency-pair" },
+    { "include": "#directive-line" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.bmake", "match": "//.*$" },
+        { "name": "comment.block.bmake", "begin": "/\\+", "end": "\\+\\\\" }
+      ]
+    },
+    "version-tag": {
+      "match": "(<)(Version)(:)\\s*([^>]+?)\\s*(>)",
+      "captures": {
+        "1": { "name": "punctuation.definition.tag.bmake" },
+        "2": { "name": "keyword.other.version.bmake" },
+        "3": { "name": "punctuation.separator.key-value.bmake" },
+        "4": { "name": "constant.numeric.version.bmake" },
+        "5": { "name": "punctuation.definition.tag.bmake" }
+      }
+    },
+    "section-keywords": {
+      "match": "^\\s*(Start|Stop)\\s*$",
+      "name": "keyword.control.section.bmake"
+    },
+    "task-tag": {
+      "patterns": [
+        {
+          "match": "(<)(Task)(:)\\s*([^>]+?)\\s*(>)",
+          "captures": {
+            "1": { "name": "punctuation.definition.tag.bmake" },
+            "2": { "name": "entity.name.tag.task.bmake" },
+            "3": { "name": "punctuation.separator.key-value.bmake" },
+            "4": { "name": "entity.name.function.task-name.bmake" },
+            "5": { "name": "punctuation.definition.tag.bmake" }
+          }
+        },
+        {
+          "match": "(</)(Task)(>)",
+          "captures": {
+            "1": { "name": "punctuation.definition.tag.bmake" },
+            "2": { "name": "entity.name.tag.task.bmake" },
+            "3": { "name": "punctuation.definition.tag.bmake" }
+          }
+        }
+      ]
+    },
+    "import-statement": {
+      "match": "^\\s*(import)\\s*(=)\\s*(.+)$",
+      "captures": {
+        "1": { "name": "keyword.control.import.bmake" },
+        "2": { "name": "keyword.operator.assignment.bmake" },
+        "3": { "name": "string.unquoted.path.bmake" }
+      }
+    },
+    "command-block": {
+      "begin": "^(\\s*)(Command)(:)\\s*(\\{)\\s*$",
+      "beginCaptures": {
+        "2": { "name": "keyword.other.directive.command.bmake" },
+        "3": { "name": "punctuation.separator.key-value.bmake" },
+        "4": { "name": "punctuation.section.block.begin.bmake" }
+      },
+      "end": "^\\s*(\\})\\s*$",
+      "endCaptures": {
+        "1": { "name": "punctuation.section.block.end.bmake" }
+      },
+      "patterns": [
+        { "match": "\\+/\\s*$", "name": "keyword.operator.continuation.bmake" },
+        { "include": "source.shell" }
+      ]
+    },
+    "command-directive": {
+      "match": "^\\s*(Command)(:)\\s*(.+)$",
+      "captures": {
+        "1": { "name": "keyword.other.directive.command.bmake" },
+        "2": { "name": "punctuation.separator.key-value.bmake" },
+        "3": { "patterns": [{ "include": "source.shell" }] }
+      }
+    },
+    "dependency-pair": {
+      "match": "^\\s*(Dependency|Tool)(:)\\s*(.+)$",
+      "captures": {
+        "1": { "name": "keyword.other.directive.bmake" },
+        "2": { "name": "punctuation.separator.key-value.bmake" },
+        "3": { "name": "entity.name.type.bmake" }
+      }
+    },
+    "directive-line": {
+      "match": "^\\s*(Lang|System|Sub-System|Platform|Arch|Shell|Runs-on|version|Remote|Env|Environment|Need|Artifact|Condition|Clean|Workdir|Directory|Input|Output|Depends-on|Timeout|StopOnError|Cache|Parallel|Profile|Log-level|Require|Before|After|Rename|OnError|Retry|Source)(:)\\s*(.*)$",
+      "captures": {
+        "1": { "name": "keyword.other.directive.bmake" },
+        "2": { "name": "punctuation.separator.key-value.bmake" },
+        "3": { "patterns": [{ "include": "#directive-value" }] }
+      }
+    },
+    "directive-value": {
+      "patterns": [
+        { "match": "\\btrue\\b", "name": "constant.language.boolean.true.bmake" },
+        { "match": "\\bfalse\\b", "name": "constant.language.boolean.false.bmake" },
+        { "match": "\\b\\d+(\\.\\d+)*\\b", "name": "constant.numeric.bmake" },
+        {
+          "match": "([A-Za-z_][A-Za-z0-9_]*)(=)",
+          "captures": {
+            "1": { "name": "variable.other.environment.bmake" },
+            "2": { "name": "keyword.operator.assignment.bmake" }
+          }
+        },
+        { "match": "==", "name": "keyword.operator.comparison.bmake" },
+        { "match": "->", "name": "keyword.operator.bmake" },
+        { "match": "\\$\\{?[A-Za-z_][A-Za-z0-9_]*\\}?", "name": "variable.other.bmake" },
+        { "match": "[^\\s]+", "name": "string.unquoted.bmake" }
+      ]
+    }
+  }
+}

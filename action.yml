@@ -28,7 +28,7 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           ${{ github.action_path }}/target
-        key: bmake-cli-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path)) }}
+        key: bmake-cli-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path)) }}-${{ hashFiles(format('{0}/crates/**/*.rs', github.action_path)) }}
 
     - name: Build BMake CLI
       shell: bash

@@ -1,0 +1,36 @@
+{
+  "name": "bmake-language",
+  "displayName": "BMake",
+  "description": "Syntax highlighting for BMake build files (.bm, .bm.kts)",
+  "version": "1.0.0",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "bmake",
+        "aliases": ["BMake", "bmake"],
+        "extensions": [".bm"],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "bmake-kts",
+        "aliases": ["BMake Kotlin Script"],
+        "extensions": [".bm.kts"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "bmake",
+        "scopeName": "source.bmake",
+        "path": "./syntaxes/bmake.tmLanguage.json"
+      },
+      {
+        "language": "bmake-kts",
+        "scopeName": "source.bmake.kts",
+        "path": "./syntaxes/bmake-kts.tmLanguage.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "BMake Kotlin Script",
+  "scopeName": "source.bmake.kts",
+  "fileTypes": ["bm.kts"],
+  "patterns": [
+    { "include": "#kotlin-control-line" },
+    { "include": "source.bmake" }
+  ],
+  "repository": {
+    "kotlin-control-line": {
+      "match": "^\\s*(val|var|fun|class|object)\\b.*$|^\\s*(if|else|for|while)\\b.*$|^\\s*[{}]\\s*$|^\\s*import(?!\\s*=).*$|^\\s*package\\b.*$",
+      "patterns": [{ "include": "source.kotlin" }]
+    }
+  }
+}

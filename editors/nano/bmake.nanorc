@@ -1,0 +1,16 @@
+syntax "bmake" "\.bm$" "\.bm\.kts$"
+comment "//"
+
+color cyan "//.*$"
+color cyan start="/\+" end="\+\\"
+
+color brightyellow "<Version:[^>]*>"
+color brightmagenta "^[[:space:]]*(Start|Stop)[[:space:]]*$"
+color brightyellow "<Task:[^>]*>" "</Task>"
+color brightblue "^[[:space:]]*import[[:space:]]*="
+
+color green "^[[:space:]]*(Lang|System|Sub-System|Platform|Arch|Shell|Runs-on|version|Remote|Env|Environment|Dependency|Need|Tool|Artifact|Condition|Clean|Workdir|Directory|Input|Output|Depends-on|Timeout|StopOnError|Cache|Parallel|Profile|Log-level|Require|Command|Before|After|Rename|OnError|Retry|Source):"
+
+color brightred "\<(true|false)\>"
+color brightgreen "\<[0-9]+(\.[0-9]+)*\>"
+color brightblack "\+/[[:space:]]*$"
