@@ -1,8 +1,14 @@
 pub mod cache;
 pub mod dependency;
 pub mod executor;
+pub mod graph;
+pub mod incremental;
+pub mod kts;
+pub mod lockfile;
+pub mod metadata;
 pub mod paths;
 pub mod plugin;
+pub mod runner;
 pub mod sandbox;
 pub mod status;
 pub mod version;

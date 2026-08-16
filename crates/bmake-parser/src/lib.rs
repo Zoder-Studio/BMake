@@ -1,6 +1,6 @@
-use std::path::Path;
-use anyhow::{bail, Result, Context};
+use anyhow::{bail, Context, Result};
 use bmake_ast::*;
+use std::path::Path;
 
 pub fn parse(input: &str) -> Result<BMakeFile> {
     let lines = bmake_lexer::to_lines(input);
@@ -45,10 +45,13 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
         version,
         ..Default::default()
     };
+
     let mut pending_dependency: Option<String> = None;
+    let mut pending_tool: Option<String> = None;
 
     while i < n {
-        let t = lines[i].trim();
+        let raw_line = lines[i].clone();
+        let t = raw_line.trim();
 
         if t.is_empty() {
             i += 1;
@@ -59,24 +62,45 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
             break;
         }
         if t.starts_with("<Task:") {
-            let (task, next_i) = parse_task(&lines, i)?;
+            let (task, next_i) = parse_task(&lines, i, &file.env)?;
             file.tasks.push(task);
             i = next_i;
             continue;
         }
+        if let Some(rest) = t.strip_prefix("import") {
+            let rest = rest.trim_start();
+            if let Some(v) = rest.strip_prefix('=') {
+                file.imports.push(v.trim().to_string());
+                i += 1;
+                continue;
+            }
+        }
         if let Some(rest) = t.strip_prefix("Dependency:") {
             pending_dependency = Some(rest.trim().to_string());
+            pending_tool = None;
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("Tool:") {
+            pending_tool = Some(rest.trim().to_string());
+            pending_dependency = None;
             i += 1;
             continue;
         }
         if let Some(rest) = t.strip_prefix("Need:") {
-            let name = pending_dependency
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("'Need' without preceding 'Dependency:' at line {}", i + 1))?;
-            file.dependencies.push(Dependency {
-                name,
-                need: rest.trim().to_string(),
-            });
+            if let Some(name) = pending_dependency.take() {
+                file.dependencies.push(Dependency {
+                    name,
+                    need: rest.trim().to_string(),
+                });
+            } else if let Some(name) = pending_tool.take() {
+                file.tools.push(ToolReq {
+                    name,
+                    need: rest.trim().to_string(),
+                });
+            } else {
+                bail!("'Need:' without preceding 'Dependency:' or 'Tool:' at line {}", i + 1);
+            }
             i += 1;
             continue;
         }
@@ -85,6 +109,7 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
             i += 1;
             continue;
         }
+
         if let Some((key, val)) = split_kv(t) {
             match key.as_str() {
                 "Lang" => file.lang = Some(val),
@@ -92,14 +117,22 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
                 "Sub-System" => file.sub_system = Some(val),
                 "Platform" => file.platform = Some(val),
                 "Arch" => file.arch = Some(val),
-                "Directory" => file.directory = Some(val),
+                "Shell" => file.shell = Some(val),
+                "Runs-on" => file.runs_on = Some(val),
+                "version" => file.runs_on_version = Some(val),
+                "Remote" => file.remote = Some(val),
+                "Workdir" => file.workdir = Some(val),
+                "Directory" => file.workdir = Some(val),
                 "Source" => file.source = Some(val),
                 "Output" => file.output = Some(val),
                 "Cache" => file.cache = val.eq_ignore_ascii_case("true"),
                 "Parallel" => file.parallel = val.eq_ignore_ascii_case("true"),
                 "Profile" => file.profile = Some(val),
-                "Include" => file.includes.push(val),
                 "Plugin" => file.plugins.push(val),
+                "Artifact" => file.artifacts.push(val),
+                "Clean" => file.clean_paths.push(val),
+                "StopOnError" => file.stop_on_error = val.eq_ignore_ascii_case("true"),
+                "Log-level" => file.log_level = parse_log_level(&val, i)?,
                 "Env" => {
                     let Some((k, v)) = val.split_once('=') else {
                         bail!("Malformed Env at line {}: expected KEY=VALUE", i + 1);
@@ -118,22 +151,13 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
     Ok(file)
 }
 
-pub fn parse_file(path: &Path) -> Result<BMakeFile> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let mut file = parse(&content).with_context(|| format!("Failed to parse {}", path.display()))?;
-
-    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let includes = std::mem::take(&mut file.includes);
-
-    for inc in &includes {
-        let inc_path = base_dir.join(inc);
-        let included = parse_file(&inc_path).with_context(|| format!("Failed to include {}", inc_path.display()))?;
-        merge_into(&mut file, included);
+fn parse_log_level(v: &str, line: usize) -> Result<LogLevel> {
+    match v {
+        "normal" => Ok(LogLevel::Normal),
+        "verbose" => Ok(LogLevel::Verbose),
+        "debug" => Ok(LogLevel::Debug),
+        other => bail!("Unknown Log-level value '{}' at line {}", other, line + 1),
     }
-
-    file.includes = includes;
-    Ok(file)
 }
 
 fn parse_version_tag(line: &str) -> Option<String> {
@@ -148,14 +172,15 @@ fn parse_version_tag(line: &str) -> Option<String> {
 }
 
 fn split_kv(line: &str) -> Option<(String, String)> {
-    line.split_once('=').map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+    line.split_once(':').map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
 }
 
-fn parse_task(lines: &[String], start: usize) -> Result<(Task, usize)> {
+fn parse_task(lines: &[String], start: usize, global_env: &std::collections::HashMap<String, String>) -> Result<(Task, usize)> {
     let header = lines[start].trim();
     let inner = header.trim_start_matches("<Task:").trim_end_matches('>').trim();
     let mut task = Task {
         name: inner.to_string(),
+        env: global_env.clone(),
         ..Default::default()
     };
 
@@ -215,7 +240,52 @@ fn parse_task(lines: &[String], start: usize) -> Result<(Task, usize)> {
             let timeout: u64 = v.parse()?;
             if let Some(last) = task.commands.last_mut() {
                 last.timeout = Some(timeout);
+            } else {
+                task.timeout = Some(timeout);
             }
+            i += 1;
+            continue;
+        }
+        if let Some(v) = strip_field(t, "Depends-on") {
+            for dep in v.split(',') {
+                let dep = dep.trim();
+                if !dep.is_empty() {
+                    task.depends_on.push(dep.to_string());
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(v) = strip_field(t, "Input") {
+            task.inputs.push(v);
+            i += 1;
+            continue;
+        }
+        if let Some(v) = strip_field(t, "Output") {
+            task.outputs.push(v);
+            i += 1;
+            continue;
+        }
+        if let Some(v) = strip_field(t, "Artifact") {
+            task.artifacts.push(v);
+            i += 1;
+            continue;
+        }
+        if let Some(v) = strip_field(t, "Condition") {
+            task.condition = Some(v);
+            i += 1;
+            continue;
+        }
+        if let Some(v) = strip_field(t, "Workdir") {
+            task.workdir = Some(v);
+            i += 1;
+            continue;
+        }
+        if let Some(v) = strip_field(t, "Env") {
+            let Some((k, val)) = v.split_once('=') else {
+                bail!("Malformed Env at line {}: expected KEY=VALUE", i + 1);
+            };
+            task.env.insert(k.trim().to_string(), val.trim().to_string());
             i += 1;
             continue;
         }
@@ -245,7 +315,7 @@ fn parse_task(lines: &[String], start: usize) -> Result<(Task, usize)> {
 
 fn strip_field(line: &str, field: &str) -> Option<String> {
     let rest = line.strip_prefix(field)?.trim_start();
-    let val = rest.strip_prefix('=')?;
+    let val = rest.strip_prefix(':')?;
     Some(val.trim().to_string())
 }
 
@@ -269,6 +339,58 @@ fn parse_multiline_command(lines: &[String], start: usize) -> Result<(String, us
     bail!("Unterminated multiline Command block")
 }
 
+/// Parses a `.bm` file from disk and recursively merges `import = ...`
+/// directives, detecting circular imports along the way.
+pub fn parse_file(path: &Path) -> Result<BMakeFile> {
+    let mut stack = Vec::new();
+    parse_file_inner(path, &mut stack)
+}
+
+fn parse_file_inner(path: &Path, stack: &mut Vec<std::path::PathBuf>) -> Result<BMakeFile> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if stack.contains(&canonical) {
+        let mut chain: Vec<String> = stack.iter().map(|p| p.display().to_string()).collect();
+        chain.push(canonical.display().to_string());
+        bail!("Circular import detected:\n{}", chain.join(" -> "));
+    }
+    stack.push(canonical);
+
+    let content = std::fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let file = parse_content_with_imports(&content, &base_dir, stack)?;
+
+    stack.pop();
+    Ok(file)
+}
+
+/// Parses already-in-memory BMake DSL text (used directly for `.bm.kts`
+/// output, and internally by `parse_file`) and resolves any `import = ...`
+/// directives relative to `base_dir`, sharing the same circular-import
+/// guard as file-based parsing.
+fn parse_content_with_imports(content: &str, base_dir: &Path, stack: &mut Vec<std::path::PathBuf>) -> Result<BMakeFile> {
+    let mut file = parse(content)?;
+    let imports = std::mem::take(&mut file.imports);
+
+    for imp in &imports {
+        let imp_path = base_dir.join(imp);
+        let imported =
+            parse_file_inner(&imp_path, stack).with_context(|| format!("Failed to import {}", imp_path.display()))?;
+        merge_into(&mut file, imported);
+    }
+
+    file.imports = imports;
+    Ok(file)
+}
+
+/// Entry point for `.bm.kts`: takes the flattened BMake DSL text produced
+/// by running the transpiled Kotlin script and parses it exactly like a
+/// regular `.bm` file — including `import = ...` resolution — using
+/// `origin_path` only to seed the circular-import guard.
+pub fn parse_kts_output(flattened: &str, base_dir: &Path, origin_path: &Path) -> Result<BMakeFile> {
+    let mut stack = vec![origin_path.canonicalize().unwrap_or_else(|_| origin_path.to_path_buf())];
+    parse_content_with_imports(flattened, base_dir, &mut stack)
+}
+
 fn merge_into(target: &mut BMakeFile, other: BMakeFile) {
     if target.lang.is_none() {
         target.lang = other.lang;
@@ -285,8 +407,20 @@ fn merge_into(target: &mut BMakeFile, other: BMakeFile) {
     if target.arch.is_none() {
         target.arch = other.arch;
     }
-    if target.directory.is_none() {
-        target.directory = other.directory;
+    if target.shell.is_none() {
+        target.shell = other.shell;
+    }
+    if target.runs_on.is_none() {
+        target.runs_on = other.runs_on;
+    }
+    if target.runs_on_version.is_none() {
+        target.runs_on_version = other.runs_on_version;
+    }
+    if target.remote.is_none() {
+        target.remote = other.remote;
+    }
+    if target.workdir.is_none() {
+        target.workdir = other.workdir;
     }
     if target.source.is_none() {
         target.source = other.source;
@@ -299,11 +433,57 @@ fn merge_into(target: &mut BMakeFile, other: BMakeFile) {
     }
     target.cache = target.cache || other.cache;
     target.parallel = target.parallel || other.parallel;
+    target.stop_on_error = target.stop_on_error && other.stop_on_error;
     target.dependencies.extend(other.dependencies);
     target.requires.extend(other.requires);
+    target.tools.extend(other.tools);
     target.plugins.extend(other.plugins);
+    target.artifacts.extend(other.artifacts);
+    target.clean_paths.extend(other.clean_paths);
     for (k, v) in other.env {
         target.env.entry(k).or_insert(v);
     }
     target.tasks.extend(other.tasks);
+}
+
+/// Transpiles a `.bm.kts` source file into a runnable Kotlin script that,
+/// when executed, prints the equivalent flattened `.bm` text on stdout.
+/// Kotlin code (val/var/fun/class/object/if/else/for/while/braces/imports)
+/// passes through unchanged; every other line is treated as BMake DSL and
+/// is emitted via `println` inside a triple-quoted string, so `$variable`
+/// and `${expr}` Kotlin string templates keep working exactly as the spec
+/// describes (e.g. `Command: ./gradlew assemble$buildType`).
+pub fn transpile_kts_to_kotlin_script(source: &str) -> String {
+    let mut out = String::new();
+    for raw_line in source.lines() {
+        let trimmed = raw_line.trim();
+        if is_kotlin_control_line(trimmed) {
+            out.push_str(raw_line);
+            out.push('\n');
+        } else if trimmed.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str("println(\"\"\"");
+            out.push_str(raw_line);
+            out.push_str("\"\"\")\n");
+        }
+    }
+    out
+}
+
+fn is_kotlin_control_line(t: &str) -> bool {
+    if t.is_empty() || t == "{" || t == "}" || t.starts_with('}') {
+        return true;
+    }
+    if let Some(rest) = t.strip_prefix("import ") {
+        // Distinguishes a real Kotlin `import kotlin.math.max` from the
+        // BMake `import = file.bm` directive, which also starts with the
+        // word "import" but is followed by `=`.
+        return !rest.trim_start().starts_with('=');
+    }
+    let prefixes = [
+        "val ", "var ", "fun ", "class ", "object ", "if (", "if(", "if ", "else", "for (", "for(", "for ",
+        "while (", "while(", "while ", "package ",
+    ];
+    prefixes.iter().any(|p| t.starts_with(p))
 }

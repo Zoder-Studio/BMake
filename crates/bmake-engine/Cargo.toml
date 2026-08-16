@@ -5,7 +5,10 @@ edition.workspace = true
 
 [dependencies]
 bmake-ast = { path = "../bmake-ast" }
+bmake-parser = { path = "../bmake-parser" }
 anyhow = "1"
 reqwest = { version = "0.12", features = ["blocking"] }
 which = "6"
 sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

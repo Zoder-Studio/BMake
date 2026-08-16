@@ -2,15 +2,16 @@
 
 Start
 
-Lang = Rust
-System = Cargo
+Lang: Rust
+System: Cargo
 
 <Task: Build>
-    Command = cargo build --release --workspace
+    Command: cargo build --release --workspace
 </Task>
 
 <Task: Test>
-    Command = cargo test --workspace
+    Depends-on: Build
+    Command: cargo test --workspace
 </Task>
 
 Stop
