@@ -1,3 +1,4 @@
+mod ui;
 use anyhow::Result;
 use bmake_engine::{dependency, executor, paths::BMakePaths, plugin, status::BuildStatus, version};
 use clap::{Parser, Subcommand};
@@ -20,7 +21,6 @@ enum Commands {
     /// Run the build defined in a .bm file
     Run {
         file: Option<PathBuf>,
-        /// Run only this Task and its transitive Depends-on
         #[arg(long)]
         task: Option<String>,
         #[arg(long)]
@@ -29,6 +29,10 @@ enum Commands {
         debug: bool,
         #[arg(long)]
         force: bool,
+        #[arg(long)]
+        no_color: bool,
+        #[arg(long)]
+        no_animation: bool,
     },
     /// Create a new BMake.bm (or BMake.bm.kts) in the current directory
     Init {
@@ -102,7 +106,9 @@ enum CacheAction {
 fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
-        Commands::Run { file, task, verbose, debug, force } => cmd_run(file, task, verbose, debug, force),
+        Commands::Run { file, task, verbose, debug, force, no_color, no_animation } => {
+            cmd_run(file, task, verbose, debug, force, no_color, no_animation)
+        }
         Commands::Init { kts } => cmd_init(kts),
         Commands::Check { file } => cmd_check(file),
         Commands::Validate { file } => cmd_validate(file),
@@ -175,7 +181,15 @@ fn parse_bm_or_kts(path: &Path) -> Result<bmake_ast::BMakeFile> {
     }
 }
 
-fn cmd_run(file: Option<PathBuf>, task: Option<String>, verbose: bool, debug: bool, force: bool) -> Result<()> {
+fn cmd_run(
+    file: Option<PathBuf>,
+    task: Option<String>,
+    verbose: bool,
+    debug: bool,
+    force: bool,
+    no_color: bool,
+    no_animation: bool,
+) -> Result<()> {
     let bm_path = find_bm_file(file)?;
     let project_dir = bm_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut bmake_file = parse_bm_or_kts(&bm_path)?;
@@ -249,7 +263,20 @@ fn cmd_run(file: Option<PathBuf>, task: Option<String>, verbose: bool, debug: bo
     let build_id = bmake_engine::metadata::new_build_id();
     println!(" Build ID: {}", build_id);
 
-    let status = executor::run_all_tasks(&bmake_file, &project_dir, &paths, force, &build_id)?;
+    let (tx, rx) = std::sync::mpsc::channel::<bmake_engine::events::TaskEvent>();
+    let ui_opts = ui::UiOptions::detect(no_color, no_animation);
+
+    let file_for_exec = bmake_file.clone();
+    let project_dir_for_exec = project_dir.clone();
+    let paths_for_exec = BMakePaths { root: paths.root.clone() };
+    let build_id_for_exec = build_id.clone();
+    let exec_handle = std::thread::spawn(move || {
+        executor::run_all_tasks(&file_for_exec, &project_dir_for_exec, &paths_for_exec, force, &build_id_for_exec, &tx)
+    });
+
+    ui::render_loop(rx, &ui_opts);
+
+    let status = exec_handle.join().map_err(|_| anyhow::anyhow!("Build executor thread panicked"))??;
 
     if status == BuildStatus::Success {
         plugin::run_after_build(&bmake_file, &project_dir)?;

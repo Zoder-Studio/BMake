@@ -1,4 +1,5 @@
 use crate::cache;
+use crate::events::{emit, EventSender, OutputStream, TaskEvent};
 use crate::graph;
 use crate::incremental;
 use crate::logstore;
@@ -21,7 +22,14 @@ enum TaskResult {
     Skipped,
 }
 
-pub fn run_all_tasks(file: &BMakeFile, project_dir: &Path, paths: &BMakePaths, force: bool, build_id: &str) -> Result<BuildStatus> {
+pub fn run_all_tasks(
+    file: &BMakeFile,
+    project_dir: &Path,
+    paths: &BMakePaths,
+    force: bool,
+    build_id: &str,
+    events: &EventSender,
+) -> Result<BuildStatus> {
     let waves = graph::topological_waves(&file.tasks)?;
     let name_to_idx: HashMap<&str, usize> = file.tasks.iter().enumerate().map(|(i, t)| (t.name.as_str(), i)).collect();
     let results: Arc<Mutex<HashMap<usize, TaskResult>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -38,22 +46,31 @@ pub fn run_all_tasks(file: &BMakeFile, project_dir: &Path, paths: &BMakePaths, f
             });
 
             if !deps_ok && file.stop_on_error {
-                println!("\n Task: {} — skipped (a dependency failed)", task.name);
+                emit(events, TaskEvent::TaskSkipped { task: task.name.clone(), reason: "a dependency failed".to_string() });
                 results.lock().unwrap().insert(idx, TaskResult::Skipped);
                 continue;
             }
 
             if let Some(cond) = &task.condition {
                 if !evaluate_condition(cond, file) {
-                    println!("\n Task: {} — skipped (Condition: {} is false)", task.name, cond);
+                    emit(
+                        events,
+                        TaskEvent::TaskSkipped { task: task.name.clone(), reason: format!("Condition: {} is false", cond) },
+                    );
                     results.lock().unwrap().insert(idx, TaskResult::Skipped);
                     continue;
                 }
             }
 
             if !force && incremental::is_up_to_date(paths, project_dir, &task) {
-                println!("\n Task: {} — up to date (Input unchanged, Output present), skipping", task.name);
                 incremental::record_hit(paths);
+                emit(
+                    events,
+                    TaskEvent::TaskSkipped {
+                        task: task.name.clone(),
+                        reason: "up to date (Input unchanged, Output present)".to_string(),
+                    },
+                );
                 results.lock().unwrap().insert(idx, TaskResult::Success);
                 continue;
             }
@@ -62,10 +79,12 @@ pub fn run_all_tasks(file: &BMakeFile, project_dir: &Path, paths: &BMakePaths, f
             let project_dir_owned = project_dir.to_path_buf();
             let paths_owned = BMakePaths { root: paths.root.clone() };
             let build_id_owned = build_id.to_string();
+            let events_owned = events.clone();
             let results_ref = Arc::clone(&results);
 
             let run_one = move || {
-                let status = run_task(&file_owned, &task, &project_dir_owned, &paths_owned, &build_id_owned).unwrap_or(BuildStatus::Failed);
+                let status = run_task(&file_owned, &task, &project_dir_owned, &paths_owned, &build_id_owned, &events_owned)
+                    .unwrap_or(BuildStatus::Failed);
                 let r = if status == BuildStatus::Success { TaskResult::Success } else { TaskResult::Failed };
                 results_ref.lock().unwrap().insert(idx, r);
             };
@@ -84,8 +103,8 @@ pub fn run_all_tasks(file: &BMakeFile, project_dir: &Path, paths: &BMakePaths, f
 
     let final_results = results.lock().unwrap();
     let mut any_failed = false;
+    let mut summary = Vec::new();
 
-    println!("\n Build summary:");
     for task in &file.tasks {
         let idx = name_to_idx[task.name.as_str()];
         let label = match final_results.get(&idx) {
@@ -97,8 +116,9 @@ pub fn run_all_tasks(file: &BMakeFile, project_dir: &Path, paths: &BMakePaths, f
             Some(TaskResult::Skipped) => "SKIPPED",
             None => "NOT RUN",
         };
-        println!("   {} : {}", task.name, label);
+        summary.push((task.name.clone(), label.to_string()));
     }
+    emit(events, TaskEvent::BuildFinished { results: summary });
 
     Ok(if any_failed { BuildStatus::Failed } else { BuildStatus::Success })
 }
@@ -121,11 +141,18 @@ pub fn evaluate_condition(cond: &str, file: &BMakeFile) -> bool {
     actual == Some(value)
 }
 
-pub fn run_task(file: &BMakeFile, task: &Task, project_dir: &Path, paths: &BMakePaths, build_id: &str) -> Result<BuildStatus> {
-    println!("\n Task: {}", task.name);
+pub fn run_task(
+    file: &BMakeFile,
+    task: &Task,
+    project_dir: &Path,
+    paths: &BMakePaths,
+    build_id: &str,
+    events: &EventSender,
+) -> Result<BuildStatus> {
+    emit(events, TaskEvent::TaskStarted { task: task.name.clone() });
 
     for cmd in &task.before {
-        run_shell(cmd, file, task, project_dir, None, paths, build_id)?;
+        run_shell(cmd, file, task, project_dir, None, paths, build_id, events)?;
     }
 
     for step in &task.commands {
@@ -140,15 +167,25 @@ pub fn run_task(file: &BMakeFile, task: &Task, project_dir: &Path, paths: &BMake
         let mut succeeded = false;
 
         for attempt in 1..=max_attempts {
-            println!(" $ {}", step.command);
-            match run_shell(&step.command, file, task, project_dir, effective_timeout, paths, build_id) {
+            if attempt == 1 {
+                emit(events, TaskEvent::CommandStarted { task: task.name.clone(), command: step.command.clone() });
+            }
+            match run_shell(&step.command, file, task, project_dir, effective_timeout, paths, build_id, events) {
                 Ok(_) => {
                     succeeded = true;
                     break;
                 }
                 Err(e) => {
                     if attempt < max_attempts {
-                        println!(" Retry {}/{}: {}", attempt, max_attempts, e);
+                        emit(
+                            events,
+                            TaskEvent::CommandRetry {
+                                task: task.name.clone(),
+                                attempt,
+                                max_attempts,
+                                error: e.to_string(),
+                            },
+                        );
                     }
                     last_err = Some(e);
                 }
@@ -156,7 +193,8 @@ pub fn run_task(file: &BMakeFile, task: &Task, project_dir: &Path, paths: &BMake
         }
 
         if !succeeded {
-            println!(" Command failed: {}", last_err.unwrap());
+            let error = last_err.unwrap().to_string();
+            emit(events, TaskEvent::TaskFailed { task: task.name.clone(), error });
             return Ok(BuildStatus::Failed);
         }
     }
@@ -169,46 +207,53 @@ pub fn run_task(file: &BMakeFile, task: &Task, project_dir: &Path, paths: &BMake
         }
         std::fs::rename(&from_path, &to_path)
             .map_err(|e| anyhow::anyhow!("Rename failed '{}' -> '{}': {}", from, to, e))?;
-        println!(" Renamed {} -> {}", from, to);
+        emit(events, TaskEvent::TaskInfo { task: task.name.clone(), message: format!("renamed {} -> {}", from, to) });
     }
 
     for cmd in &task.after {
-        run_shell(cmd, file, task, project_dir, None, paths, build_id)?;
+        run_shell(cmd, file, task, project_dir, None, paths, build_id, events)?;
     }
 
     for artifact in task.artifacts.iter().chain(file.artifacts.iter()) {
-        report_artifact(project_dir, artifact);
+        if let Some(found) = resolve_artifact(project_dir, artifact) {
+            emit(events, TaskEvent::TaskInfo { task: task.name.clone(), message: format!("artifact: {}", found) });
+        }
     }
 
     if !task.inputs.is_empty() && !task.outputs.is_empty() {
         if let Err(e) = incremental::record(paths, project_dir, task) {
-            println!(" Warning: failed to record incremental state for '{}': {}", task.name, e);
+            emit(
+                events,
+                TaskEvent::TaskInfo {
+                    task: task.name.clone(),
+                    message: format!("warning: failed to record incremental state: {}", e),
+                },
+            );
         }
     }
 
-    println!(" Task '{}' finished", task.name);
+    emit(events, TaskEvent::TaskSucceeded { task: task.name.clone() });
     Ok(BuildStatus::Success)
 }
 
-fn report_artifact(project_dir: &Path, pattern: &str) {
+fn resolve_artifact(project_dir: &Path, pattern: &str) -> Option<String> {
     let full = project_dir.join(pattern);
     if full.exists() {
-        println!(" Artifact: {}", full.display());
-        return;
+        return Some(full.display().to_string());
     }
-    if let Some(parent) = full.parent() {
-        if let (Some(name_pattern), Ok(entries)) = (full.file_name().and_then(|s| s.to_str()), std::fs::read_dir(parent)) {
-            if let Some(prefix) = name_pattern.strip_suffix('*') {
-                for entry in entries.flatten() {
-                    if entry.file_name().to_string_lossy().starts_with(prefix) {
-                        println!(" Artifact: {}", entry.path().display());
-                    }
-                }
-            }
+    let parent = full.parent()?;
+    let name_pattern = full.file_name()?.to_str()?;
+    let prefix = name_pattern.strip_suffix('*')?;
+    let entries = std::fs::read_dir(parent).ok()?;
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(prefix) {
+            return Some(entry.path().display().to_string());
         }
     }
+    None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_shell(
     cmd: &str,
     file: &BMakeFile,
@@ -217,6 +262,7 @@ fn run_shell(
     timeout: Option<u64>,
     paths: &BMakePaths,
     build_id: &str,
+    events: &EventSender,
 ) -> Result<()> {
     let workdir_rel = task.workdir.as_ref().or(file.workdir.as_ref());
     let workdir = match workdir_rel {
@@ -242,8 +288,13 @@ fn run_shell(
     let (program, shell_flag) = shell_command(shell);
 
     if file.log_level != LogLevel::Normal {
-        println!("   workdir: {}", workdir.display());
-        println!("   shell: {} {}", program, shell_flag);
+        emit(
+            events,
+            TaskEvent::TaskInfo {
+                task: task.name.clone(),
+                message: format!("workdir: {}  shell: {} {}", workdir.display(), program, shell_flag),
+            },
+        );
     }
     if file.log_level == LogLevel::Debug {
         let mut keys: Vec<&String> = env.keys().collect();
@@ -252,7 +303,7 @@ fn run_shell(
             let upper = k.to_uppercase();
             let is_secret = ["TOKEN", "SECRET", "PASSWORD", "KEY"].iter().any(|s| upper.contains(s));
             let shown = if is_secret { "***".to_string() } else { env[k].clone() };
-            println!("   env {}={}", k, shown);
+            emit(events, TaskEvent::TaskInfo { task: task.name.clone(), message: format!("env {}={}", k, shown) });
         }
     }
 
@@ -268,12 +319,16 @@ fn run_shell(
     let out_handle = child.stdout.take().map(|s| {
         let paths = BMakePaths { root: paths.root.clone() };
         let build_id = build_id.to_string();
-        thread::spawn(move || forward_and_log(s, &paths, &build_id))
+        let task_name = task.name.clone();
+        let events = events.clone();
+        thread::spawn(move || forward(s, &paths, &build_id, &task_name, OutputStream::Stdout, &events))
     });
     let err_handle = child.stderr.take().map(|s| {
         let paths = BMakePaths { root: paths.root.clone() };
         let build_id = build_id.to_string();
-        thread::spawn(move || forward_and_log(s, &paths, &build_id))
+        let task_name = task.name.clone();
+        let events = events.clone();
+        thread::spawn(move || forward(s, &paths, &build_id, &task_name, OutputStream::Stderr, &events))
     });
 
     let status = match timeout {
@@ -294,14 +349,14 @@ fn run_shell(
     Ok(())
 }
 
-/// Prints each line to the terminal as it arrives (same as before) and also
-/// persists it to `.bmake/logs/<build_id>.log`, so `bmake logs` reflects the
-/// real command output rather than a reconstructed summary.
-fn forward_and_log(reader: impl std::io::Read, paths: &BMakePaths, build_id: &str) {
+/// Persists each line to `.bmake/logs/<build_id>.log` (data, unconditional)
+/// and emits a TaskEvent for it. The execution engine no longer writes to
+/// the terminal directly — that's the Build UI Renderer's job.
+fn forward(reader: impl std::io::Read, paths: &BMakePaths, build_id: &str, task: &str, stream: OutputStream, events: &EventSender) {
     use std::io::{BufRead, BufReader};
     for line in BufReader::new(reader).lines().flatten() {
-        println!("{}", line);
         let _ = logstore::append_line(paths, build_id, &line);
+        emit(events, TaskEvent::CommandOutput { task: task.to_string(), stream, line });
     }
 }
 
@@ -332,5 +387,34 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> Resu
             bail!("TIMEOUT");
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_with(profile: Option<&str>) -> BMakeFile {
+        BMakeFile { profile: profile.map(|s| s.to_string()), ..Default::default() }
+    }
+
+    #[test]
+    fn condition_true_when_field_matches() {
+        assert!(evaluate_condition("Profile == Release", &file_with(Some("Release"))));
+    }
+
+    #[test]
+    fn condition_false_when_field_differs() {
+        assert!(!evaluate_condition("Profile == Release", &file_with(Some("Debug"))));
+    }
+
+    #[test]
+    fn condition_false_when_field_unset() {
+        assert!(!evaluate_condition("Profile == Release", &file_with(None)));
+    }
+
+    #[test]
+    fn malformed_condition_defaults_to_true() {
+        assert!(evaluate_condition("not a condition", &file_with(None)));
     }
 }

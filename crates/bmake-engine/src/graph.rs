@@ -126,3 +126,69 @@ fn detect_cycle(tasks: &[Task], name_to_idx: &HashMap<&str, usize>) -> Result<()
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bmake_ast::Task;
+
+    fn task(name: &str, deps: &[&str]) -> Task {
+        Task {
+            name: name.to_string(),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn normal_dependency_orders_correctly() {
+        let tasks = vec![task("Compile", &[]), task("Test", &["Compile"]), task("Package", &["Test"])];
+        let waves = topological_waves(&tasks).unwrap();
+        assert_eq!(waves.len(), 3);
+        assert_eq!(tasks[waves[0][0]].name, "Compile");
+        assert_eq!(tasks[waves[1][0]].name, "Test");
+        assert_eq!(tasks[waves[2][0]].name, "Package");
+    }
+
+    #[test]
+    fn independent_tasks_share_a_wave() {
+        let tasks = vec![
+            task("Compile", &[]),
+            task("Test", &["Compile"]),
+            task("Lint", &["Compile"]),
+            task("Package", &["Test", "Lint"]),
+        ];
+        let waves = topological_waves(&tasks).unwrap();
+        assert_eq!(waves[1].len(), 2);
+    }
+
+    #[test]
+    fn circular_dependency_is_detected_with_chain() {
+        let tasks = vec![task("A", &["B"]), task("B", &["C"]), task("C", &["A"])];
+        let err = topological_waves(&tasks).unwrap_err();
+        assert!(err.to_string().contains("Circular task dependency"));
+    }
+
+    #[test]
+    fn unknown_dependency_is_rejected() {
+        let tasks = vec![task("Package", &["Compile"])];
+        let err = topological_waves(&tasks).unwrap_err();
+        assert!(err.to_string().contains("unknown task"));
+    }
+
+    #[test]
+    fn transitive_closure_includes_only_needed_tasks() {
+        let tasks = vec![
+            task("Compile", &[]),
+            task("Test", &["Compile"]),
+            task("Package", &["Test", "Compile"]),
+            task("Deploy", &["Package"]),
+        ];
+        let subset = transitive_closure(&tasks, "Test").unwrap();
+        let names: std::collections::HashSet<_> = subset.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains("Compile"));
+        assert!(names.contains("Test"));
+        assert!(!names.contains("Package"));
+        assert!(!names.contains("Deploy"));
+    }
+}

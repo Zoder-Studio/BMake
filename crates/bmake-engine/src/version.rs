@@ -132,3 +132,39 @@ pub fn target_arch() -> &'static str {
         "unknown"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::BMakePaths;
+
+    #[test]
+    fn current_version_returns_running_binary_without_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BMakePaths::new(dir.path());
+        let resolved = ensure_engine(&paths, CURRENT_ENGINE_VERSION).unwrap();
+        assert_eq!(resolved, std::env::current_exe().unwrap());
+    }
+
+    #[test]
+    fn pre_existing_local_engine_is_used_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BMakePaths::new(dir.path());
+        let engine_dir = engine_dir_for(&paths, "9.9");
+        std::fs::create_dir_all(&engine_dir).unwrap();
+        let bin = engine_dir.join("bmake-engine");
+        std::fs::write(&bin, b"fake").unwrap();
+
+        let resolved = ensure_engine(&paths, "9.9").unwrap();
+        assert_eq!(resolved, bin);
+    }
+
+    #[test]
+    #[ignore = "hits the real network (GitHub Releases); run explicitly with `cargo test -- --ignored`"]
+    fn missing_remote_engine_fails_clearly() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BMakePaths::new(dir.path());
+        let err = ensure_engine(&paths, "999.999-does-not-exist").unwrap_err();
+        assert!(err.to_string().contains("not found on GitHub Releases"));
+    }
+}

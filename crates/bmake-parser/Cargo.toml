@@ -7,3 +7,6 @@ edition.workspace = true
 bmake-ast = { path = "../bmake-ast" }
 bmake-lexer = { path = "../bmake-lexer" }
 anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod cloud;
 pub mod dependency;
+pub mod events;
 pub mod executor;
 pub mod graph;
 pub mod incremental;

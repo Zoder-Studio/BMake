@@ -467,3 +467,97 @@ fn is_kotlin_control_line(t: &str) -> bool {
     ];
     prefixes.iter().any(|p| t.starts_with(p))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_temp(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        path
+    }
+
+    #[test]
+    fn version_tag_and_runs_on_version_are_independent() {
+        let src = "<Version: 1.0>\n\nStart\n\nRuns-on: ubuntu\nversion: 24.04\n\nStop";
+        let file = parse(src).unwrap();
+        assert_eq!(file.version, "1.0");
+        assert_eq!(file.runs_on, Some("ubuntu".to_string()));
+        assert_eq!(file.runs_on_version, Some("24.04".to_string()));
+    }
+
+    #[test]
+    fn unknown_directive_is_rejected() {
+        let src = "<Version: 1.0>\n\nStart\n\nNotARealDirective: value\n\nStop";
+        let err = parse(src).unwrap_err();
+        assert!(err.to_string().contains("Unknown directive"));
+    }
+
+    #[test]
+    fn multiline_command_joins_continuation_lines() {
+        let src = "<Version: 1.0>\n\nStart\n\n<Task: Build>\n    Command: {\n        ./gradlew +/\n        assembleRelease\n    }\n</Task>\n\nStop";
+        let file = parse(src).unwrap();
+        assert_eq!(file.tasks[0].commands[0].command, "./gradlew assembleRelease");
+    }
+
+    #[test]
+    fn import_merges_tasks_from_other_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_temp(
+            dir.path(),
+            "other.bm",
+            "<Version: 1.0>\n\nStart\n\n<Task: FromOther>\n    Command: echo hi\n</Task>\n\nStop",
+        );
+        let main_path = write_temp(
+            dir.path(),
+            "main.bm",
+            "<Version: 1.0>\n\nStart\n\nimport = other.bm\n\n<Task: Main>\n    Command: echo main\n</Task>\n\nStop",
+        );
+
+        let file = parse_file(&main_path).unwrap();
+        let names: Vec<_> = file.tasks.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"FromOther"));
+        assert!(names.contains(&"Main"));
+    }
+
+    #[test]
+    fn duplicate_task_across_import_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write_temp(
+            dir.path(),
+            "other.bm",
+            "<Version: 1.0>\n\nStart\n\n<Task: Build>\n    Command: echo other\n</Task>\n\nStop",
+        );
+        let main_path = write_temp(
+            dir.path(),
+            "main.bm",
+            "<Version: 1.0>\n\nStart\n\nimport = other.bm\n\n<Task: Build>\n    Command: echo main\n</Task>\n\nStop",
+        );
+
+        let err = parse_file(&main_path).unwrap_err();
+        assert!(err.to_string().contains("Duplicate Task"));
+    }
+
+    #[test]
+    fn circular_import_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write_temp(dir.path(), "a.bm", "<Version: 1.0>\n\nStart\n\nimport = b.bm\n\nStop");
+        write_temp(dir.path(), "b.bm", "<Version: 1.0>\n\nStart\n\nimport = a.bm\n\nStop");
+        let main_path = dir.path().join("a.bm");
+
+        let err = parse_file(&main_path).unwrap_err();
+        assert!(err.to_string().contains("Circular import"));
+    }
+
+    #[test]
+    fn missing_import_reports_clear_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_path = write_temp(dir.path(), "main.bm", "<Version: 1.0>\n\nStart\n\nimport = does-not-exist.bm\n\nStop");
+        let err = parse_file(&main_path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Failed to import") || msg.contains("Failed to read"));
+    }
+}
