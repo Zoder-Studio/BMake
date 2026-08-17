@@ -1,6 +1,7 @@
 use crate::cache;
 use crate::graph;
 use crate::incremental;
+use crate::logstore;
 use crate::paths::BMakePaths;
 use crate::sandbox;
 use crate::status::BuildStatus;
@@ -20,7 +21,7 @@ enum TaskResult {
     Skipped,
 }
 
-pub fn run_all_tasks(file: &BMakeFile, project_dir: &Path, paths: &BMakePaths, force: bool) -> Result<BuildStatus> {
+pub fn run_all_tasks(file: &BMakeFile, project_dir: &Path, paths: &BMakePaths, force: bool, build_id: &str) -> Result<BuildStatus> {
     let waves = graph::topological_waves(&file.tasks)?;
     let name_to_idx: HashMap<&str, usize> = file.tasks.iter().enumerate().map(|(i, t)| (t.name.as_str(), i)).collect();
     let results: Arc<Mutex<HashMap<usize, TaskResult>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -52,6 +53,7 @@ pub fn run_all_tasks(file: &BMakeFile, project_dir: &Path, paths: &BMakePaths, f
 
             if !force && incremental::is_up_to_date(paths, project_dir, &task) {
                 println!("\n Task: {} — up to date (Input unchanged, Output present), skipping", task.name);
+                incremental::record_hit(paths);
                 results.lock().unwrap().insert(idx, TaskResult::Success);
                 continue;
             }
@@ -59,10 +61,11 @@ pub fn run_all_tasks(file: &BMakeFile, project_dir: &Path, paths: &BMakePaths, f
             let file_owned = file.clone();
             let project_dir_owned = project_dir.to_path_buf();
             let paths_owned = BMakePaths { root: paths.root.clone() };
+            let build_id_owned = build_id.to_string();
             let results_ref = Arc::clone(&results);
 
             let run_one = move || {
-                let status = run_task(&file_owned, &task, &project_dir_owned, &paths_owned).unwrap_or(BuildStatus::Failed);
+                let status = run_task(&file_owned, &task, &project_dir_owned, &paths_owned, &build_id_owned).unwrap_or(BuildStatus::Failed);
                 let r = if status == BuildStatus::Success { TaskResult::Success } else { TaskResult::Failed };
                 results_ref.lock().unwrap().insert(idx, r);
             };
@@ -100,7 +103,7 @@ pub fn run_all_tasks(file: &BMakeFile, project_dir: &Path, paths: &BMakePaths, f
     Ok(if any_failed { BuildStatus::Failed } else { BuildStatus::Success })
 }
 
-fn evaluate_condition(cond: &str, file: &BMakeFile) -> bool {
+pub fn evaluate_condition(cond: &str, file: &BMakeFile) -> bool {
     let Some((field, value)) = cond.split_once("==") else {
         return true;
     };
@@ -118,11 +121,11 @@ fn evaluate_condition(cond: &str, file: &BMakeFile) -> bool {
     actual == Some(value)
 }
 
-pub fn run_task(file: &BMakeFile, task: &Task, project_dir: &Path, paths: &BMakePaths) -> Result<BuildStatus> {
+pub fn run_task(file: &BMakeFile, task: &Task, project_dir: &Path, paths: &BMakePaths, build_id: &str) -> Result<BuildStatus> {
     println!("\n Task: {}", task.name);
 
     for cmd in &task.before {
-        run_shell(cmd, file, task, project_dir, None, paths)?;
+        run_shell(cmd, file, task, project_dir, None, paths, build_id)?;
     }
 
     for step in &task.commands {
@@ -138,7 +141,7 @@ pub fn run_task(file: &BMakeFile, task: &Task, project_dir: &Path, paths: &BMake
 
         for attempt in 1..=max_attempts {
             println!(" $ {}", step.command);
-            match run_shell(&step.command, file, task, project_dir, effective_timeout, paths) {
+            match run_shell(&step.command, file, task, project_dir, effective_timeout, paths, build_id) {
                 Ok(_) => {
                     succeeded = true;
                     break;
@@ -170,7 +173,7 @@ pub fn run_task(file: &BMakeFile, task: &Task, project_dir: &Path, paths: &BMake
     }
 
     for cmd in &task.after {
-        run_shell(cmd, file, task, project_dir, None, paths)?;
+        run_shell(cmd, file, task, project_dir, None, paths, build_id)?;
     }
 
     for artifact in task.artifacts.iter().chain(file.artifacts.iter()) {
@@ -206,7 +209,15 @@ fn report_artifact(project_dir: &Path, pattern: &str) {
     }
 }
 
-fn run_shell(cmd: &str, file: &BMakeFile, task: &Task, project_dir: &Path, timeout: Option<u64>, paths: &BMakePaths) -> Result<()> {
+fn run_shell(
+    cmd: &str,
+    file: &BMakeFile,
+    task: &Task,
+    project_dir: &Path,
+    timeout: Option<u64>,
+    paths: &BMakePaths,
+    build_id: &str,
+) -> Result<()> {
     let workdir_rel = task.workdir.as_ref().or(file.workdir.as_ref());
     let workdir = match workdir_rel {
         Some(d) => {
@@ -250,17 +261,48 @@ fn run_shell(cmd: &str, file: &BMakeFile, task: &Task, project_dir: &Path, timeo
         .arg(cmd)
         .current_dir(&workdir)
         .envs(&env)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
+
+    let out_handle = child.stdout.take().map(|s| {
+        let paths = BMakePaths { root: paths.root.clone() };
+        let build_id = build_id.to_string();
+        thread::spawn(move || forward_and_log(s, &paths, &build_id))
+    });
+    let err_handle = child.stderr.take().map(|s| {
+        let paths = BMakePaths { root: paths.root.clone() };
+        let build_id = build_id.to_string();
+        thread::spawn(move || forward_and_log(s, &paths, &build_id))
+    });
 
     let status = match timeout {
         Some(secs) => wait_with_timeout(&mut child, Duration::from_secs(secs))?,
         None => child.wait()?,
     };
 
+    if let Some(h) = out_handle {
+        let _ = h.join();
+    }
+    if let Some(h) = err_handle {
+        let _ = h.join();
+    }
+
     if !status.success() {
         bail!("Command exited with status {:?}", status.code());
     }
     Ok(())
+}
+
+/// Prints each line to the terminal as it arrives (same as before) and also
+/// persists it to `.bmake/logs/<build_id>.log`, so `bmake logs` reflects the
+/// real command output rather than a reconstructed summary.
+fn forward_and_log(reader: impl std::io::Read, paths: &BMakePaths, build_id: &str) {
+    use std::io::{BufRead, BufReader};
+    for line in BufReader::new(reader).lines().flatten() {
+        println!("{}", line);
+        let _ = logstore::append_line(paths, build_id, &line);
+    }
 }
 
 fn default_shell() -> &'static str {

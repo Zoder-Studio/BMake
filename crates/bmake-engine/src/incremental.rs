@@ -18,10 +18,7 @@ fn state_path(paths: &BMakePaths) -> PathBuf {
 
 fn load_state(paths: &BMakePaths) -> IncrementalState {
     let path = state_path(paths);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|c| toml::from_str(&c).ok())
-        .unwrap_or_default()
+    std::fs::read_to_string(&path).ok().and_then(|c| toml::from_str(&c).ok()).unwrap_or_default()
 }
 
 fn save_state(paths: &BMakePaths, state: &IncrementalState) -> Result<()> {
@@ -33,9 +30,48 @@ fn save_state(paths: &BMakePaths, state: &IncrementalState) -> Result<()> {
     Ok(())
 }
 
-/// Fingerprints every file under the task's `Input:` paths using
-/// path + size + modified-time (not full file contents, to stay fast on
-/// large trees like `node_modules` or `build/`).
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct CacheStats {
+    #[serde(default)]
+    hits: u64,
+    #[serde(default)]
+    misses: u64,
+}
+
+fn stats_path(paths: &BMakePaths) -> PathBuf {
+    paths.cache().join("stats.toml")
+}
+
+fn load_stats(paths: &BMakePaths) -> CacheStats {
+    std::fs::read_to_string(stats_path(paths)).ok().and_then(|c| toml::from_str(&c).ok()).unwrap_or_default()
+}
+
+fn save_stats(paths: &BMakePaths, stats: &CacheStats) {
+    if let Some(parent) = stats_path(paths).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(stats_path(paths), toml::to_string_pretty(stats).unwrap_or_default());
+}
+
+/// Called by the executor whenever a Task is skipped because its Input
+/// fingerprint hasn't changed.
+pub fn record_hit(paths: &BMakePaths) {
+    let mut s = load_stats(paths);
+    s.hits += 1;
+    save_stats(paths, &s);
+}
+
+fn record_miss(paths: &BMakePaths) {
+    let mut s = load_stats(paths);
+    s.misses += 1;
+    save_stats(paths, &s);
+}
+
+pub fn stats(paths: &BMakePaths) -> (u64, u64) {
+    let s = load_stats(paths);
+    (s.hits, s.misses)
+}
+
 fn fingerprint(project_dir: &Path, inputs: &[String]) -> Option<String> {
     if inputs.is_empty() {
         return None;
@@ -91,9 +127,6 @@ fn outputs_exist(project_dir: &Path, outputs: &[String]) -> bool {
     outputs.iter().all(|o| project_dir.join(o).exists())
 }
 
-/// A task can be skipped when it declares both Input and Output, its Input
-/// fingerprint matches the last recorded run, and every declared Output
-/// still exists on disk.
 pub fn is_up_to_date(paths: &BMakePaths, project_dir: &Path, task: &Task) -> bool {
     if task.inputs.is_empty() || task.outputs.is_empty() {
         return false;
@@ -108,8 +141,10 @@ pub fn is_up_to_date(paths: &BMakePaths, project_dir: &Path, task: &Task) -> boo
     state.task.get(&task.name).map(|f| f == &current).unwrap_or(false)
 }
 
-/// Records the current Input fingerprint after a task finishes successfully.
+/// Records the current Input fingerprint after a task finishes successfully,
+/// and counts it as a cache miss (it had to actually run).
 pub fn record(paths: &BMakePaths, project_dir: &Path, task: &Task) -> Result<()> {
+    record_miss(paths);
     let Some(current) = fingerprint(project_dir, &task.inputs) else {
         return Ok(());
     };

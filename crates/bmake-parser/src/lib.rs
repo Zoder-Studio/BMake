@@ -359,7 +359,21 @@ fn parse_content_with_imports(content: &str, base_dir: &Path, stack: &mut Vec<st
     }
 
     file.imports = imports;
+    check_duplicate_tasks(&file)?;
     Ok(file)
+}
+
+fn check_duplicate_tasks(file: &BMakeFile) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for t in &file.tasks {
+        if !seen.insert(t.name.as_str()) {
+            bail!(
+                "Duplicate Task '{}' found (likely declared in more than one imported .bm file)",
+                t.name
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn parse_kts_output(flattened: &str, base_dir: &Path, origin_path: &Path) -> Result<BMakeFile> {

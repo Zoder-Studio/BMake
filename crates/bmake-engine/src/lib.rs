@@ -6,6 +6,7 @@ pub mod graph;
 pub mod incremental;
 pub mod kts;
 pub mod lockfile;
+pub mod logstore;
 pub mod metadata;
 pub mod paths;
 pub mod plugin;

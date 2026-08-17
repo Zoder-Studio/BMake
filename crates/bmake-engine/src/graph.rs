@@ -48,6 +48,36 @@ pub fn topological_waves(tasks: &[Task]) -> Result<Vec<Vec<usize>>> {
     Ok(waves)
 }
 
+/// Returns the subset of `tasks` needed to run `target`: the task itself
+/// plus every task it transitively `Depends-on`. Used by
+/// `bmake run <file> --task <name>`.
+pub fn transitive_closure(tasks: &[Task], target: &str) -> Result<Vec<Task>> {
+    let name_to_idx: HashMap<&str, usize> = tasks.iter().enumerate().map(|(i, t)| (t.name.as_str(), i)).collect();
+    let Some(&target_idx) = name_to_idx.get(target) else {
+        bail!("Task '{}' not found", target);
+    };
+
+    let mut needed: HashSet<usize> = HashSet::new();
+    let mut stack = vec![target_idx];
+    while let Some(idx) = stack.pop() {
+        if !needed.insert(idx) {
+            continue;
+        }
+        for dep in &tasks[idx].depends_on {
+            if let Some(&dep_idx) = name_to_idx.get(dep.as_str()) {
+                stack.push(dep_idx);
+            }
+        }
+    }
+
+    Ok(tasks
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| needed.contains(i))
+        .map(|(_, t)| t.clone())
+        .collect())
+}
+
 fn detect_cycle(tasks: &[Task], name_to_idx: &HashMap<&str, usize>) -> Result<()> {
     #[derive(Clone, Copy, PartialEq)]
     enum State {
