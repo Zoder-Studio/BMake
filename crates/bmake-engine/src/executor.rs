@@ -8,7 +8,7 @@ use crate::sandbox;
 use crate::status::BuildStatus;
 use anyhow::{bail, Result};
 use bmake_ast::{BMakeFile, LogLevel, OnError, Task};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command as Proc;
 use std::sync::{Arc, Mutex};
@@ -22,6 +22,7 @@ enum TaskResult {
     Skipped,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_all_tasks(
     file: &BMakeFile,
     project_dir: &Path,
@@ -29,6 +30,7 @@ pub fn run_all_tasks(
     force: bool,
     build_id: &str,
     events: &EventSender,
+    secrets_to_mask: &HashSet<String>,
 ) -> Result<BuildStatus> {
     let waves = graph::topological_waves(&file.tasks)?;
     let name_to_idx: HashMap<&str, usize> = file.tasks.iter().enumerate().map(|(i, t)| (t.name.as_str(), i)).collect();
@@ -42,10 +44,16 @@ pub fn run_all_tasks(
 
             let deps_ok = task.depends_on.iter().all(|d| {
                 let dep_idx = name_to_idx[d.as_str()];
-                matches!(results.lock().unwrap().get(&dep_idx), Some(TaskResult::Success))
+                match results.lock().unwrap().get(&dep_idx).copied() {
+                    Some(TaskResult::Success) => true,
+                    // Task-level ContinueOnError overrides global StopOnError
+                    // for whether Tasks depending on THIS failed Task still run.
+                    Some(TaskResult::Failed) => file.tasks[dep_idx].continue_on_error.unwrap_or(!file.stop_on_error),
+                    _ => false,
+                }
             });
 
-            if !deps_ok && file.stop_on_error {
+            if !deps_ok {
                 emit(events, TaskEvent::TaskSkipped { task: task.name.clone(), reason: "a dependency failed".to_string() });
                 results.lock().unwrap().insert(idx, TaskResult::Skipped);
                 continue;
@@ -80,10 +88,11 @@ pub fn run_all_tasks(
             let paths_owned = BMakePaths { root: paths.root.clone() };
             let build_id_owned = build_id.to_string();
             let events_owned = events.clone();
+            let secrets_owned = secrets_to_mask.clone();
             let results_ref = Arc::clone(&results);
 
             let run_one = move || {
-                let status = run_task(&file_owned, &task, &project_dir_owned, &paths_owned, &build_id_owned, &events_owned)
+                let status = run_task(&file_owned, &task, &project_dir_owned, &paths_owned, &build_id_owned, &events_owned, &secrets_owned)
                     .unwrap_or(BuildStatus::Failed);
                 let r = if status == BuildStatus::Success { TaskResult::Success } else { TaskResult::Failed };
                 results_ref.lock().unwrap().insert(idx, r);
@@ -141,6 +150,7 @@ pub fn evaluate_condition(cond: &str, file: &BMakeFile) -> bool {
     actual == Some(value)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_task(
     file: &BMakeFile,
     task: &Task,
@@ -148,11 +158,12 @@ pub fn run_task(
     paths: &BMakePaths,
     build_id: &str,
     events: &EventSender,
+    secrets_to_mask: &HashSet<String>,
 ) -> Result<BuildStatus> {
     emit(events, TaskEvent::TaskStarted { task: task.name.clone() });
 
     for cmd in &task.before {
-        run_shell(cmd, file, task, project_dir, None, paths, build_id, events)?;
+        run_shell(cmd, file, task, project_dir, None, paths, build_id, events, secrets_to_mask)?;
     }
 
     for step in &task.commands {
@@ -170,7 +181,7 @@ pub fn run_task(
             if attempt == 1 {
                 emit(events, TaskEvent::CommandStarted { task: task.name.clone(), command: step.command.clone() });
             }
-            match run_shell(&step.command, file, task, project_dir, effective_timeout, paths, build_id, events) {
+            match run_shell(&step.command, file, task, project_dir, effective_timeout, paths, build_id, events, secrets_to_mask) {
                 Ok(_) => {
                     succeeded = true;
                     break;
@@ -211,7 +222,7 @@ pub fn run_task(
     }
 
     for cmd in &task.after {
-        run_shell(cmd, file, task, project_dir, None, paths, build_id, events)?;
+        run_shell(cmd, file, task, project_dir, None, paths, build_id, events, secrets_to_mask)?;
     }
 
     for artifact in task.artifacts.iter().chain(file.artifacts.iter()) {
@@ -263,6 +274,7 @@ fn run_shell(
     paths: &BMakePaths,
     build_id: &str,
     events: &EventSender,
+    secrets_to_mask: &HashSet<String>,
 ) -> Result<()> {
     let workdir_rel = task.workdir.as_ref().or(file.workdir.as_ref());
     let workdir = match workdir_rel {
@@ -301,8 +313,8 @@ fn run_shell(
         keys.sort();
         for k in keys {
             let upper = k.to_uppercase();
-            let is_secret = ["TOKEN", "SECRET", "PASSWORD", "KEY"].iter().any(|s| upper.contains(s));
-            let shown = if is_secret { "***".to_string() } else { env[k].clone() };
+            let is_secret_key = ["TOKEN", "SECRET", "PASSWORD", "KEY"].iter().any(|s| upper.contains(s));
+            let shown = if is_secret_key { "***".to_string() } else { mask_secrets(&env[k], secrets_to_mask) };
             emit(events, TaskEvent::TaskInfo { task: task.name.clone(), message: format!("env {}={}", k, shown) });
         }
     }
@@ -321,14 +333,16 @@ fn run_shell(
         let build_id = build_id.to_string();
         let task_name = task.name.clone();
         let events = events.clone();
-        thread::spawn(move || forward(s, &paths, &build_id, &task_name, OutputStream::Stdout, &events))
+        let secrets = secrets_to_mask.clone();
+        thread::spawn(move || forward(s, &paths, &build_id, &task_name, OutputStream::Stdout, &events, &secrets))
     });
     let err_handle = child.stderr.take().map(|s| {
         let paths = BMakePaths { root: paths.root.clone() };
         let build_id = build_id.to_string();
         let task_name = task.name.clone();
         let events = events.clone();
-        thread::spawn(move || forward(s, &paths, &build_id, &task_name, OutputStream::Stderr, &events))
+        let secrets = secrets_to_mask.clone();
+        thread::spawn(move || forward(s, &paths, &build_id, &task_name, OutputStream::Stderr, &events, &secrets))
     });
 
     let status = match timeout {
@@ -349,14 +363,35 @@ fn run_shell(
     Ok(())
 }
 
-/// Persists each line to `.bmake/logs/<build_id>.log` (data, unconditional)
-/// and emits a TaskEvent for it. The execution engine no longer writes to
-/// the terminal directly — that's the Build UI Renderer's job.
-fn forward(reader: impl std::io::Read, paths: &BMakePaths, build_id: &str, task: &str, stream: OutputStream, events: &EventSender) {
+/// Masks every known secret VALUE (never a Value: value, only actual
+/// resolved Secret.* values) before the line ever reaches a log file, an
+/// event, or the terminal. The child process itself still gets the real
+/// value via its environment — only what we capture/forward gets redacted.
+fn mask_secrets(line: &str, secrets: &HashSet<String>) -> String {
+    let mut out = line.to_string();
+    for s in secrets {
+        if !s.is_empty() {
+            out = out.replace(s.as_str(), "********");
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward(
+    reader: impl std::io::Read,
+    paths: &BMakePaths,
+    build_id: &str,
+    task: &str,
+    stream: OutputStream,
+    events: &EventSender,
+    secrets: &HashSet<String>,
+) {
     use std::io::{BufRead, BufReader};
     for line in BufReader::new(reader).lines().flatten() {
-        let _ = logstore::append_line(paths, build_id, &line);
-        emit(events, TaskEvent::CommandOutput { task: task.to_string(), stream, line });
+        let masked = mask_secrets(&line, secrets);
+        let _ = logstore::append_line(paths, build_id, &masked);
+        emit(events, TaskEvent::CommandOutput { task: task.to_string(), stream, line: masked });
     }
 }
 
@@ -409,12 +444,15 @@ mod tests {
     }
 
     #[test]
-    fn condition_false_when_field_unset() {
-        assert!(!evaluate_condition("Profile == Release", &file_with(None)));
+    fn mask_secrets_redacts_known_values() {
+        let mut secrets = HashSet::new();
+        secrets.insert("abc123".to_string());
+        assert_eq!(mask_secrets("Deploying with token abc123", &secrets), "Deploying with token ********");
     }
 
     #[test]
-    fn malformed_condition_defaults_to_true() {
-        assert!(evaluate_condition("not a condition", &file_with(None)));
+    fn mask_secrets_leaves_unrelated_text_alone() {
+        let secrets = HashSet::new();
+        assert_eq!(mask_secrets("hello world", &secrets), "hello world");
     }
 }

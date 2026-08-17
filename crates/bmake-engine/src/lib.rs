@@ -14,4 +14,6 @@ pub mod plugin;
 pub mod runner;
 pub mod sandbox;
 pub mod status;
+pub mod values;
+pub mod vault;
 pub mod version;

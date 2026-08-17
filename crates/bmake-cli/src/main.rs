@@ -88,6 +88,21 @@ enum Commands {
         #[command(subcommand)]
         action: RunnerAction,
     },
+    /// Add a secret to the local vault (secret.bm.locksys)
+    Add {
+        #[command(subcommand)]
+        what: AddKind,
+    },
+    /// Remove a secret from the local vault
+    Remove {
+        #[command(subcommand)]
+        what: RemoveKind,
+    },
+    /// Alias group for secret management (same implementation as add/remove)
+    Secret {
+        #[command(subcommand)]
+        action: SecretAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -95,6 +110,23 @@ enum RunnerAction {
     Register,
     Start { id: String },
     Status,
+}
+
+#[derive(Subcommand)]
+enum AddKind {
+    Secret { name: String },
+}
+
+#[derive(Subcommand)]
+enum RemoveKind {
+    Secret { name: String },
+}
+
+#[derive(Subcommand)]
+enum SecretAction {
+    Add { name: String },
+    List,
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -128,6 +160,13 @@ fn main() {
             RunnerAction::Register => cmd_runner_register(),
             RunnerAction::Start { id } => cmd_runner_start(&id),
             RunnerAction::Status => cmd_runner_status(),
+        },
+        Commands::Add { what: AddKind::Secret { name } } => cmd_secret_add(&name),
+        Commands::Remove { what: RemoveKind::Secret { name } } => cmd_secret_remove(&name),
+        Commands::Secret { action } => match action {
+            SecretAction::Add { name } => cmd_secret_add(&name),
+            SecretAction::List => cmd_secret_list(),
+            SecretAction::Remove { name } => cmd_secret_remove(&name),
         },
     };
 
@@ -229,6 +268,9 @@ fn cmd_run(
                 bmake_file.arch.as_deref(),
             )?;
             if let Some(runner) = matched {
+                // Ships the raw .bm text as-is — the Runner machine resolves
+                // its own Secret references against its OWN local vault, so
+                // decrypted secret values never leave this machine.
                 let raw_content = std::fs::read_to_string(&bm_path)?;
                 let exit_code = dispatch_cloud_job(&session, &runner, &raw_content)?;
                 std::process::exit(exit_code);
@@ -244,6 +286,24 @@ fn cmd_run(
     } else if let Some(remote) = bmake_file.remote.clone() {
         handle_remote(&remote, &bmake_file)?;
     }
+
+    // Resolve Secret before Tool/Dependency, per the pre-flight order:
+    // Parse -> Validate -> Resolve Secret -> Resolve Tool -> Resolve Runner
+    // -> Build Dependency Graph -> Execute. Only the specific secrets this
+    // file references are ever decrypted.
+    let secret_names = bmake_engine::values::referenced_secret_names(&bmake_file);
+    let mut secret_values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if !secret_names.is_empty() {
+        let vault = bmake_engine::vault::Vault::at(&project_dir);
+        if !vault.exists() {
+            let first = secret_names.iter().next().cloned().unwrap_or_default();
+            anyhow::bail!("Secret \"{}\" was not found.\n\nCreate it with:\n\n    bmake add secret {}", first, first);
+        }
+        let passphrase = rpassword::prompt_password(" vault passphrase: ")?;
+        let names_vec: Vec<String> = secret_names.into_iter().collect();
+        secret_values = vault.get_secrets(&passphrase, &names_vec)?;
+    }
+    let (_, secret_values_used) = bmake_engine::values::resolve(&mut bmake_file, &secret_values)?;
 
     let paths = BMakePaths::new(&project_dir);
     paths.ensure_all()?;
@@ -270,8 +330,17 @@ fn cmd_run(
     let project_dir_for_exec = project_dir.clone();
     let paths_for_exec = BMakePaths { root: paths.root.clone() };
     let build_id_for_exec = build_id.clone();
+    let secrets_for_exec = secret_values_used;
     let exec_handle = std::thread::spawn(move || {
-        executor::run_all_tasks(&file_for_exec, &project_dir_for_exec, &paths_for_exec, force, &build_id_for_exec, &tx)
+        executor::run_all_tasks(
+            &file_for_exec,
+            &project_dir_for_exec,
+            &paths_for_exec,
+            force,
+            &build_id_for_exec,
+            &tx,
+            &secrets_for_exec,
+        )
     });
 
     ui::render_loop(rx, &ui_opts);
@@ -453,7 +522,7 @@ fn cmd_validate(file: Option<PathBuf>) -> Result<()> {
     let bm_path = find_bm_file(file)?;
     println!("BMake Validation\n");
 
-    let bmake_file = match parse_bm_or_kts(&bm_path) {
+    let mut bmake_file = match parse_bm_or_kts(&bm_path) {
         Ok(f) => f,
         Err(e) => {
             println!("✗ Syntax invalid\n");
@@ -461,6 +530,38 @@ fn cmd_validate(file: Option<PathBuf>) -> Result<()> {
         }
     };
     println!("✓ Syntax valid");
+
+    match bmake_engine::values::resolve_values_only(&mut bmake_file) {
+        Ok(report) => {
+            println!("✓ Value references valid");
+            let all = bmake_engine::values::all_paths(&bmake_file.values);
+            let unused: Vec<&String> = all.difference(&report.used_paths).collect();
+            if !unused.is_empty() {
+                let mut sorted = unused.clone();
+                sorted.sort();
+                for path in sorted {
+                    println!("⚠ Unused value detected:\n\n    Value.{}\n", path);
+                    warnings += 1;
+                }
+            }
+        }
+        Err(e) => {
+            println!("✗ Value reference invalid\n");
+            return Err(e);
+        }
+    }
+
+    let referenced_secrets = bmake_engine::values::referenced_secret_names(&bmake_file);
+    let declared_secrets: std::collections::HashSet<&str> = bmake_file.secrets.iter().map(|s| s.as_str()).collect();
+    for name in &referenced_secrets {
+        if !declared_secrets.contains(name.as_str()) {
+            println!("⚠ Secret '{}' is referenced but not declared with 'Secret: {}'", name, name);
+            warnings += 1;
+        }
+    }
+    if !bmake_file.secrets.is_empty() {
+        println!("✓ Secret declarations present ({})", bmake_file.secrets.join(", "));
+    }
 
     if bmake_file.version == version::CURRENT_ENGINE_VERSION {
         println!("✓ Version supported ({})", bmake_file.version);
@@ -523,6 +624,10 @@ fn cmd_validate(file: Option<PathBuf>) -> Result<()> {
         );
     }
 
+    if bmake_file.sub_system.is_some() && bmake_file.system.is_none() {
+        println!("⚠ Sub-System is set but System is missing — Sub-System has nothing to attach to");
+        warnings += 1;
+    }
     println!();
     if warnings == 0 {
         println!("BMake file is valid.");
@@ -561,6 +666,7 @@ fn cmd_list(what: Option<String>) -> Result<()> {
                 println!("  {}", a);
             }
         }
+        Some("secrets") => return cmd_secret_list(),
         Some(other) => anyhow::bail!("Unknown 'bmake list {}'. Try: tasks, tools, dependencies, artifacts", other),
     }
     Ok(())
@@ -673,13 +779,9 @@ fn cmd_login() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("BMAKE_SUPABASE_ANON_KEY is not set. Point it at your BMake control-plane Supabase project."))?;
 
     let email = prompt("Email")?;
-    print!(" Password: ");
-    std::io::stdout().flush()?;
-    let mut password = String::new();
-    std::io::stdin().read_line(&mut password)?;
-    let password = password.trim();
+    let password = rpassword::prompt_password(" Password: ")?;
 
-    let session = bmake_engine::cloud::login(&supabase_url, &anon_key, &email, password)?;
+    let session = bmake_engine::cloud::login(&supabase_url, &anon_key, &email, &password)?;
     println!(" Logged in as {} — session stored at ~/.bmake/credentials.toml", session.email);
     Ok(())
 }
@@ -754,6 +856,73 @@ fn cmd_cache_clear() -> Result<()> {
     let paths = BMakePaths::new(&cwd);
     bmake_engine::cache::clear(&paths)?;
     println!(" Cleared {} (engines/ and dependencies/ were not touched)", paths.cache().display());
+    Ok(())
+}
+
+fn cmd_secret_add(name: &str) -> Result<()> {
+    bmake_engine::vault::validate_secret_name(name)?;
+    let cwd = std::env::current_dir()?;
+    let vault = bmake_engine::vault::Vault::at(&cwd);
+
+    println!("BMake — Secret Vault\n");
+    println!("Secret: {}\n", name);
+
+    let passphrase = if vault.exists() {
+        rpassword::prompt_password(" vault passphrase: ")?
+    } else {
+        println!(" No vault found — creating a new one at secret.bm.locksys");
+        let p1 = rpassword::prompt_password(" set a new vault passphrase: ")?;
+        let p2 = rpassword::prompt_password(" confirm passphrase: ")?;
+        if p1 != p2 {
+            anyhow::bail!("Passphrases did not match");
+        }
+        vault.create(&p1)?;
+        p1
+    };
+
+    let value = rpassword::prompt_password(" add value: ")?;
+    vault.add_secret(&passphrase, name, &value)?;
+    println!("\n✓ Secret {} created", name);
+    Ok(())
+}
+
+fn cmd_secret_list() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let vault = bmake_engine::vault::Vault::at(&cwd);
+    if !vault.exists() {
+        println!("Secrets:\n\n  (no vault found — use 'bmake add secret <name>' to create one)");
+        return Ok(());
+    }
+    let passphrase = rpassword::prompt_password(" vault passphrase: ")?;
+    let names = vault.list_names(&passphrase)?;
+    println!("Secrets:\n");
+    if names.is_empty() {
+        println!("  (none)");
+    }
+    for n in names {
+        println!("  {}", n);
+    }
+    Ok(())
+}
+
+fn cmd_secret_remove(name: &str) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let vault = bmake_engine::vault::Vault::at(&cwd);
+    if !vault.exists() {
+        anyhow::bail!("No vault found at secret.bm.locksys");
+    }
+    let confirm = prompt(&format!("Remove secret '{}'? Type 'yes' to confirm", name))?;
+    if confirm.trim() != "yes" {
+        println!(" Cancelled");
+        return Ok(());
+    }
+    let passphrase = rpassword::prompt_password(" vault passphrase: ")?;
+    let removed = vault.remove_secret(&passphrase, name)?;
+    if removed {
+        println!("✓ Secret {} removed", name);
+    } else {
+        println!(" Secret {} was not found in the vault", name);
+    }
     Ok(())
 }
 

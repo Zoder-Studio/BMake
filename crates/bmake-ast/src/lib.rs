@@ -6,6 +6,12 @@ pub enum OnError {
     Retry,
 }
 
+#[derive(Debug, Clone)]
+pub enum ValueNode {
+    Scalar(String),
+    Map(std::collections::BTreeMap<String, ValueNode>),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CommandStep {
     pub command: String,
@@ -41,6 +47,7 @@ pub struct Task {
     pub workdir: Option<String>,
     pub env: HashMap<String, String>,
     pub timeout: Option<u64>,
+    pub continue_on_error: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,6 +92,8 @@ pub struct BMakeFile {
     pub stop_on_error: bool,
     pub log_level: LogLevel,
     pub tasks: Vec<Task>,
+    pub values: std::collections::BTreeMap<String, ValueNode>,
+    pub secrets: Vec<String>,
 }
 
 impl Default for BMakeFile {
@@ -117,6 +126,8 @@ impl Default for BMakeFile {
             stop_on_error: true,
             log_level: LogLevel::Normal,
             tasks: Vec::new(),
+            values: std::collections::BTreeMap::new(),
+            secrets: Vec::new(),
         }
     }
 }

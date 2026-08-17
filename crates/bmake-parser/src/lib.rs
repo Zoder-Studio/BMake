@@ -1,24 +1,14 @@
 use anyhow::{bail, Context, Result};
 use bmake_ast::*;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub fn parse(input: &str) -> Result<BMakeFile> {
     let lines = bmake_lexer::to_lines(input);
     let n = lines.len();
 
-    let mut i = skip_blank(&lines, 0);
-    if i >= n {
-        bail!("Missing '<Version: ...>' tag");
-    }
-    let version = parse_version_tag(lines[i].trim())
-        .ok_or_else(|| anyhow::anyhow!("Expected '<Version: ...>' before Start at line {}", i + 1))?;
-    i += 1;
-
-    i = skip_blank(&lines, i);
-    if i >= n || lines[i].trim() != "Start" {
-        bail!("Expected 'Start' after Version tag at line {}", i + 1);
-    }
-    i += 1;
+    let (version, mut i) = find_version_tag(&lines)?;
+    i = find_start(&lines, i)?;
 
     let mut file = BMakeFile {
         version,
@@ -46,6 +36,15 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
             i = next_i;
             continue;
         }
+        if t == "Value:" {
+            let value_indent = leading_spaces(&lines[i]);
+            let (values, next_i) = parse_value_map(&lines, i + 1, value_indent)?;
+            for (k, v) in values {
+                file.values.insert(k, v);
+            }
+            i = next_i;
+            continue;
+        }
         if let Some(rest) = t.strip_prefix("import") {
             let rest = rest.trim_start();
             if let Some(v) = rest.strip_prefix('=') {
@@ -57,6 +56,22 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
         if let Some(rest) = t.strip_prefix("Dependency:") {
             pending_dependency = Some(rest.trim().to_string());
             pending_tool = None;
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("Secret:") {
+            let name = rest.trim();
+            if name.is_empty() {
+                bail!("'Secret:' requires a name at line {}", i + 1);
+            }
+            if name.contains('=') {
+                let bare_name = name.split('=').next().unwrap_or("").trim();
+                bail!(
+                    "BMake Error:\n\nPossible plaintext secret detected.\n\nValue:\n********\n\nIf this is a secret, store it securely using:\n\n    bmake add secret {}\n\nFor CI:\n\n    Store it in your GitHub repository secrets.",
+                    bare_name
+                );
+            }
+            file.secrets.push(name.to_string());
             i += 1;
             continue;
         }
@@ -130,11 +145,81 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
     Ok(file)
 }
 
-fn skip_blank(lines: &[String], mut i: usize) -> usize {
+fn find_version_tag(lines: &[String]) -> Result<(String, usize)> {
+    let mut i = 0;
     while i < lines.len() && lines[i].trim().is_empty() {
         i += 1;
     }
-    i
+    if i >= lines.len() {
+        bail!("Missing '<Version: ...>' tag");
+    }
+    let version = parse_version_tag(lines[i].trim())
+        .ok_or_else(|| anyhow::anyhow!("Expected '<Version: ...>' before Start at line {}", i + 1))?;
+    Ok((version, i + 1))
+}
+
+fn find_start(lines: &[String], mut i: usize) -> Result<usize> {
+    while i < lines.len() && lines[i].trim().is_empty() {
+        i += 1;
+    }
+    if i >= lines.len() || lines[i].trim() != "Start" {
+        bail!("Expected 'Start' after Version tag at line {}", i + 1);
+    }
+    Ok(i + 1)
+}
+
+fn leading_spaces(line: &str) -> usize {
+    line.chars().take_while(|c| *c == ' ').count()
+}
+
+/// Parses the indented body of a `Value:` block into a nested map. This is
+/// the one place in BMake where indentation carries meaning — deliberately
+/// scoped to just this block, not a change to the overall flat grammar.
+fn parse_value_map(lines: &[String], start: usize, parent_indent: usize) -> Result<(BTreeMap<String, ValueNode>, usize)> {
+    let mut map = BTreeMap::new();
+    let mut i = start;
+    let n = lines.len();
+    let mut item_indent: Option<usize> = None;
+
+    while i < n {
+        let raw = &lines[i];
+        if raw.trim().is_empty() {
+            i += 1;
+            continue;
+        }
+        let indent = leading_spaces(raw);
+        if indent <= parent_indent {
+            break;
+        }
+        if let Some(expected) = item_indent {
+            if indent != expected {
+                bail!("Inconsistent indentation inside Value: block at line {}", i + 1);
+            }
+        } else {
+            item_indent = Some(indent);
+        }
+
+        let trimmed = raw.trim();
+        let Some((key, rest)) = trimmed.split_once(':') else {
+            bail!("Malformed Value entry at line {}: expected 'Key: value' or 'Key:'", i + 1);
+        };
+        let key = key.trim().to_string();
+        let rest = rest.trim();
+
+        if rest.is_empty() {
+            let (child, next_i) = parse_value_map(lines, i + 1, indent)?;
+            if child.is_empty() {
+                bail!("Value key '{}' at line {} has no content", key, i + 1);
+            }
+            map.insert(key, ValueNode::Map(child));
+            i = next_i;
+        } else {
+            map.insert(key, ValueNode::Scalar(rest.to_string()));
+            i += 1;
+        }
+    }
+
+    Ok((map, i))
 }
 
 fn parse_log_level(v: &str, line: usize) -> Result<LogLevel> {
@@ -183,6 +268,9 @@ fn parse_task(lines: &[String], start: usize, global_env: &std::collections::Has
             i += 1;
             return Ok((task, i));
         }
+        if t == "Value:" {
+            bail!("'Value:' must be declared at global scope, not inside Task '{}' (line {})", task.name, i + 1);
+        }
 
         if let Some(v) = strip_field(t, "Before") {
             task.before.push(v);
@@ -229,6 +317,11 @@ fn parse_task(lines: &[String], start: usize, global_env: &std::collections::Has
             } else {
                 task.timeout = Some(timeout);
             }
+            i += 1;
+            continue;
+        }
+        if let Some(v) = strip_field(t, "ContinueOnError") {
+            task.continue_on_error = Some(v.eq_ignore_ascii_case("true"));
             i += 1;
             continue;
         }
@@ -433,9 +526,15 @@ fn merge_into(target: &mut BMakeFile, other: BMakeFile) {
     for (k, v) in other.env {
         target.env.entry(k).or_insert(v);
     }
+    for (k, v) in other.values {
+        target.values.entry(k).or_insert(v);
+    }
     target.tasks.extend(other.tasks);
+    target.secrets.extend(other.secrets);
 }
 
+/// Transpiles a `.bm.kts` source file into a runnable Kotlin script that,
+/// when executed, prints the equivalent flattened `.bm` text on stdout.
 pub fn transpile_kts_to_kotlin_script(source: &str) -> String {
     let mut out = String::new();
     for raw_line in source.lines() {
@@ -559,5 +658,24 @@ mod tests {
         let err = parse_file(&main_path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Failed to import") || msg.contains("Failed to read"));
+    }
+
+    #[test]
+    fn value_block_parses_nested_structure() {
+        let src = "<Version: 1.0>\n\nStart\n\nValue:\n    Project:\n        Name: MyApp\n        Android:\n            CompileSdk: 35\n\nStop";
+        let file = parse(src).unwrap();
+        let ValueNode::Map(project) = file.values.get("Project").unwrap() else { panic!("expected map") };
+        let ValueNode::Scalar(name) = project.get("Name").unwrap() else { panic!("expected scalar") };
+        assert_eq!(name, "MyApp");
+        let ValueNode::Map(android) = project.get("Android").unwrap() else { panic!("expected map") };
+        let ValueNode::Scalar(sdk) = android.get("CompileSdk").unwrap() else { panic!("expected scalar") };
+        assert_eq!(sdk, "35");
+    }
+
+    #[test]
+    fn value_inside_task_is_rejected() {
+        let src = "<Version: 1.0>\n\nStart\n\n<Task: Build>\n    Value:\n        X: 1\n    Command: echo hi\n</Task>\n\nStop";
+        let err = parse(src).unwrap_err();
+        assert!(err.to_string().contains("global scope"));
     }
 }
