@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use bmake_ast::{BMakeFile, ValueNode};
+use core::fmt::Debug;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub struct UsageReport {
