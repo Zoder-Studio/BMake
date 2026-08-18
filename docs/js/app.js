@@ -1,926 +1,369 @@
-import {
-  createClient
-} from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-
-/*
- * BMake Control Plane
- *
- * IMPORTANT:
- * The anon key is safe to expose in frontend code.
- * Security MUST be enforced by Supabase RLS.
- */
-
-const SUPABASE_URL =
-  "https://bqtexxwyabicspfbpalf.supabase.co";
-
+const SUPABASE_URL = 'https://bqtexxwyabicspfbpalf.supabase.co';
 const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJxdGV4eHh3YWJpY3NwZmJwYWxmIiwic3ViIjoiYW5vbiIsImlhdCI6MTc4Njg1NjcxMywiZXhwIjoyMTAyNDMyNzEzfQ.r6igXYU197wzWy-RB_unhnqoLRDJEZqW6nXoMY3tADc";
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJxdGV4eHd5YWJpY3NwZmJwYWxmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY4NTY3MTMsImV4cCI6MjEwMjQzMjcxM30.r6igXYU197wzWy-RB_unhnqoLRDJEZqW6nXoMY3tADc';
 
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const supabase = createClient(
-  SUPABASE_URL,
-  SUPABASE_ANON_KEY
-);
+let authMode = 'signin';
+let runnersCache = null;
 
-
-let authMode = "signin";
-
-
-/* =========================================
-   AUTH
-========================================= */
-
-window.setAuthMode = function (mode) {
-
-  authMode = mode;
-
-  const signin =
-    document.getElementById("signin-tab");
-
-  const signup =
-    document.getElementById("signup-tab");
-
-  const title =
-    document.getElementById("auth-title");
-
-  const subtitle =
-    document.getElementById("auth-subtitle");
-
-  const submit =
-    document.getElementById("auth-submit");
-
-  const confirm =
-    document.getElementById("confirm-password-wrap");
-
-  const message =
-    document.getElementById("auth-message");
-
-  message.textContent = "";
-  message.className = "";
-
-  signin.classList.toggle(
-    "auth-switch-active",
-    mode === "signin"
-  );
-
-  signup.classList.toggle(
-    "auth-switch-active",
-    mode === "signup"
-  );
-
-
-  if (mode === "signin") {
-
-    title.textContent = "Welcome back";
-
-    subtitle.textContent =
-      "Sign in to your BMake Control Plane.";
-
-    submit.textContent = "Sign in";
-
-    confirm.style.display = "none";
-
-  } else {
-
-    title.textContent =
-      "Create your account";
-
-    subtitle.textContent =
-      "Create an account for BMake Control Plane.";
-
-    submit.textContent =
-      "Create account";
-
-    confirm.style.display =
-      "flex";
-
-  }
-
-};
-
-
-window.handleAuth = async function (event) {
-
-  event.preventDefault();
-
-  const email =
-    document.getElementById("email")
-      .value
-      .trim();
-
-  const password =
-    document.getElementById("password")
-      .value;
-
-  const confirmPassword =
-    document.getElementById("confirm-password")
-      .value;
-
-  const submit =
-    document.getElementById("auth-submit");
-
-  const message =
-    document.getElementById("auth-message");
-
-
-  message.textContent = "";
-
-  submit.disabled = true;
-
-
-  try {
-
-    if (authMode === "signup") {
-
-      if (password !== confirmPassword) {
-
-        throw new Error(
-          "Passwords do not match."
-        );
-
-      }
-
-
-      const {
-        data,
-        error
-      } = await supabase.auth.signUp({
-        email,
-        password
-      });
-
-
-      if (error) {
-        throw error;
-      }
-
-
-      if (!data.session) {
-
-        message.className =
-          "status-SUCCESS";
-
-        message.textContent =
-          "Account created. Check your email to confirm your account.";
-
-        return;
-      }
-
-
-      await refreshUserBox();
-
-      return;
-    }
-
-
-    const {
-      error
-    } = await supabase.auth.signInWithPassword({
-      email,
-      password
-    });
-
-
-    if (error) {
-      throw error;
-    }
-
-
-    await refreshUserBox();
-
-
-  } catch (error) {
-
-    message.className =
-      "status-ERROR";
-
-    message.textContent =
-      error.message ||
-      "Authentication failed.";
-
-  } finally {
-
-    submit.disabled = false;
-
-  }
-
-};
-
-
-window.doLogout = async function () {
-
-  await supabase.auth.signOut();
-
-  await refreshUserBox();
-
-};
-
-
-/* =========================================
-   USER
-========================================= */
+// ---------- auth ----------
 
 async function refreshUserBox() {
-
   const {
-    data: {
-      session
-    }
+    data: { session },
   } = await supabase.auth.getSession();
+  const box = document.getElementById('user-box');
 
+  if (session) {
+    box.innerHTML = `<span class="user-email">${session.user.email}</span><button class="secondary-button" onclick="doLogout()">Sign out</button>`;
+    document.getElementById('login-view').hidden = true;
+    document.getElementById('app-view').hidden = false;
+    showTab('runners');
+  } else {
+    box.innerHTML = '';
+    document.getElementById('login-view').hidden = false;
+    document.getElementById('app-view').hidden = true;
+  }
+}
 
-  const userBox =
-    document.getElementById("user-box");
+window.setAuthMode = function (mode) {
+  authMode = mode;
+  document.getElementById('signin-tab').classList.toggle('auth-switch-active', mode === 'signin');
+  document.getElementById('signup-tab').classList.toggle('auth-switch-active', mode === 'signup');
 
+  const title = document.getElementById('auth-title');
+  const subtitle = document.getElementById('auth-subtitle');
+  const submit = document.getElementById('auth-submit');
+  const confirmWrap = document.getElementById('confirm-password-wrap');
+  const confirmInput = document.getElementById('confirm-password');
+  const message = document.getElementById('auth-message');
 
-  if (!session) {
+  if (mode === 'signin') {
+    title.textContent = 'Welcome back';
+    subtitle.textContent = 'Sign in to your BMake Control Plane.';
+    submit.textContent = 'Sign in';
+    confirmWrap.hidden = true;
+    confirmInput.required = false;
+  } else {
+    title.textContent = 'Create your account';
+    subtitle.textContent = 'Set up a BMake Control Plane account.';
+    submit.textContent = 'Create account';
+    confirmWrap.hidden = false;
+    confirmInput.required = true;
+  }
+  message.textContent = '';
+  message.className = '';
+};
 
-    userBox.innerHTML = "";
+window.handleAuth = async function (event) {
+  event.preventDefault();
+  const email = document.getElementById('email').value;
+  const password = document.getElementById('password').value;
+  const message = document.getElementById('auth-message');
+  message.textContent = '';
+  message.className = '';
 
-    document.getElementById(
-      "login-view"
-    ).style.display = "flex";
-
-    document.getElementById(
-      "app-view"
-    ).style.display = "none";
-
+  if (authMode === 'signup') {
+    const confirm = document.getElementById('confirm-password').value;
+    if (password !== confirm) {
+      message.textContent = 'Passwords do not match';
+      message.className = 'error-text';
+      return;
+    }
+    const { data, error } = await supabase.auth.signUp({ email, password });
+    if (error) {
+      message.textContent = error.message;
+      message.className = 'error-text';
+      return;
+    }
+    if (!data.session) {
+      message.textContent = 'Account created — check your email to confirm before signing in.';
+      message.className = 'info-text';
+      return;
+    }
+    await refreshUserBox();
     return;
   }
 
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) {
+    message.textContent = error.message;
+    message.className = 'error-text';
+    return;
+  }
+  await refreshUserBox();
+};
 
-  userBox.innerHTML = `
-    <span>${escapeHtml(
-      session.user.email
-    )}</span>
+window.doLogout = async function () {
+  await supabase.auth.signOut();
+  runnersCache = null;
+  await refreshUserBox();
+};
 
-    <button
-      class="secondary-button"
-      onclick="doLogout()"
-    >
-      Sign out
-    </button>
-  `;
-
-
-  document.getElementById(
-    "login-view"
-  ).style.display = "none";
-
-
-  document.getElementById(
-    "app-view"
-  ).style.display = "block";
-
-
-  document.getElementById(
-    "settings-email"
-  ).textContent =
-    session.user.email;
-
-
-  await Promise.all([
-    loadRunners(),
-    loadSecrets(),
-    loadBuilds()
-  ]);
-
-}
-
-
-/* =========================================
-   TABS
-========================================= */
+// ---------- tabs ----------
 
 window.showTab = function (name) {
-
-  const tabs = [
-    "runners",
-    "secrets",
-    "builds",
-    "settings"
-  ];
-
-
-  for (const tab of tabs) {
-
-    const button =
-      document.getElementById(
-        `tab-${tab}`
-      );
-
-    const view =
-      document.getElementById(
-        `view-${tab}`
-      );
-
-
-    button.classList.toggle(
-      "active",
-      tab === name
-    );
-
-    view.hidden =
-      tab !== name;
-
+  const tabs = ['runners', 'secrets', 'builds', 'settings'];
+  for (const t of tabs) {
+    document.getElementById(`tab-${t}`).classList.toggle('active', t === name);
+    document.getElementById(`view-${t}`).hidden = t !== name;
   }
-
+  if (name === 'runners') loadRunners();
+  if (name === 'secrets') loadSecrets();
+  if (name === 'builds') loadBuilds();
+  if (name === 'settings') loadSettings();
 };
 
+async function loadSettings() {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  document.getElementById('settings-email').textContent = user ? user.email : '—';
+}
 
-/* =========================================
-   RUNNERS
-========================================= */
+// ---------- runners ----------
+
+async function fetchRunnersCache() {
+  if (runnersCache) return runnersCache;
+  const { data, error } = await supabase.from('runners').select('id,name');
+  runnersCache = error ? [] : data;
+  return runnersCache;
+}
 
 async function loadRunners() {
-
-  const body =
-    document.getElementById(
-      "runners-body"
-    );
-
-
-  const {
-    data,
-    error
-  } = await supabase
-    .from("runners")
-    .select("*")
-    .order(
-      "created_at",
-      {
-        ascending: false
-      }
-    );
-
-
+  const { data, error } = await supabase.from('runners').select('*').order('created_at', { ascending: false });
+  const body = document.getElementById('runners-body');
+  body.innerHTML = '';
   if (error) {
-
-    body.innerHTML = `
-      <tr>
-        <td colspan="6">
-          ${escapeHtml(error.message)}
-        </td>
-      </tr>
-    `;
-
+    body.innerHTML = `<tr><td colspan="6">${error.message}</td></tr>`;
     return;
   }
-
-
-  body.innerHTML = "";
-
-
-  for (const runner of data || []) {
-
-    body.innerHTML += `
-      <tr>
-
-        <td>
-          ${escapeHtml(runner.name)}
-        </td>
-
-        <td>
-          ${escapeHtml(runner.runs_on)}
-        </td>
-
-        <td>
-          ${escapeHtml(
-            runner.version || "—"
-          )}
-        </td>
-
-        <td>
-          ${escapeHtml(
-            runner.arch || "—"
-          )}
-        </td>
-
-        <td class="status-${escapeHtml(
-          runner.status
-        )}">
-          ${escapeHtml(
-            runner.status
-          )}
-        </td>
-
-        <td>
-          <code>
-            ${escapeHtml(runner.id)}
-          </code>
-        </td>
-
-      </tr>
-    `;
-
+  for (const r of data) {
+    body.innerHTML += `<tr>
+      <td>${r.name}</td><td>${r.runs_on}</td><td>${r.version}</td><td>${r.arch}</td>
+      <td class="status-${r.status}">${r.status}</td>
+      <td><code>${r.id}</code></td>
+    </tr>`;
   }
-
-
-  await loadRunnerOptions(data || []);
-
 }
-
 
 window.openRunnerModal = function () {
-
-  document.getElementById(
-    "runner-modal"
-  ).hidden = false;
-
+  document.getElementById('runner-name').value = '';
+  document.getElementById('runner-runs-on').value = '';
+  document.getElementById('runner-version').value = '';
+  document.getElementById('runner-arch').value = '';
+  document.getElementById('runner-error').textContent = '';
+  document.getElementById('runner-modal').hidden = false;
 };
-
 
 window.closeRunnerModal = function () {
-
-  document.getElementById(
-    "runner-modal"
-  ).hidden = true;
-
+  document.getElementById('runner-modal').hidden = true;
 };
-
 
 window.createRunner = async function (event) {
-
   event.preventDefault();
-
-
-  const name =
-    document.getElementById(
-      "runner-name"
-    ).value.trim();
-
-  const runsOn =
-    document.getElementById(
-      "runner-runs-on"
-    ).value.trim();
-
-  const version =
-    document.getElementById(
-      "runner-version"
-    ).value.trim();
-
-  const arch =
-    document.getElementById(
-      "runner-arch"
-    ).value.trim();
-
+  const name = document.getElementById('runner-name').value.trim();
+  const runsOn = document.getElementById('runner-runs-on').value.trim();
+  const version = document.getElementById('runner-version').value.trim();
+  const arch = document.getElementById('runner-arch').value.trim();
+  const errorBox = document.getElementById('runner-error');
+  errorBox.textContent = '';
 
   const {
-    error
-  } = await supabase
-    .from("runners")
-    .insert({
-      name,
-      runs_on: runsOn,
-      version,
-      arch,
-      status: "OFFLINE"
-    });
+    data: { user },
+  } = await supabase.auth.getUser();
 
+  const { error } = await supabase.from('runners').insert({
+    owner: user.id,
+    name,
+    runs_on: runsOn,
+    version,
+    arch,
+    status: 'OFFLINE',
+  });
 
   if (error) {
-
-    document.getElementById(
-      "runner-error"
-    ).textContent =
-      error.message;
-
+    errorBox.textContent = error.message;
     return;
   }
 
-
-  document.querySelector(
-    "#runner-modal form"
-  ).reset();
-
-
+  runnersCache = null;
   closeRunnerModal();
-
-  await loadRunners();
-
+  loadRunners();
 };
 
-
-/* =========================================
-   SECRET UI
-========================================= */
+// ---------- secrets ----------
 
 async function loadSecrets() {
-
-  const list =
-    document.getElementById(
-      "secrets-list"
-    );
-
-
-  /*
-   * IMPORTANT:
-   *
-   * This query assumes that the backend stores
-   * secret metadata separately from secret values.
-   *
-   * NEVER select encrypted/plaintext secret
-   * values into this frontend.
-   */
-
-  const {
-    data,
-    error
-  } = await supabase
-    .from("secrets")
-    .select(
-      "id,name,runner_id,created_at"
-    )
-    .order(
-      "created_at",
-      {
-        ascending: false
-      }
-    );
-
+  const { data, error } = await supabase.rpc('list_online_secrets');
+  const container = document.getElementById('secrets-list');
+  container.innerHTML = '';
 
   if (error) {
-
-    list.innerHTML = `
-      <div class="secret-item">
-        ${escapeHtml(error.message)}
-      </div>
-    `;
-
+    container.innerHTML = `<p class="error-text">${error.message}</p>`;
+    return;
+  }
+  if (!data.length) {
+    container.innerHTML = '<p class="muted">No secrets yet.</p>';
     return;
   }
 
+  const runners = await fetchRunnersCache();
 
-  list.innerHTML = "";
+  for (const row of data) {
+    const { data: grantData } = await supabase.rpc('list_secret_grants', { p_secret_name: row.name });
+    const grants = grantData || [];
+    const grantedIds = new Set(grants.map((g) => g.runner_id));
 
+    const chips =
+      grants
+        .map(
+          (g) =>
+            `<span class="chip">${g.runner_name}<button type="button" class="chip-x" onclick="revokeAccess('${row.name}','${g.runner_id}')">×</button></span>`
+        )
+        .join('') || '<span class="muted">No Runs-on granted yet</span>';
 
-  for (const secret of data || []) {
+    const options = runners
+      .filter((r) => !grantedIds.has(r.id))
+      .map((r) => `<option value="${r.id}">${r.name}</option>`)
+      .join('');
 
-    list.innerHTML += `
-      <div class="secret-item">
-
-        <div>
-
-          <div class="secret-name">
-            ${escapeHtml(secret.name)}
-          </div>
-
-          <small>
-            Created ${escapeHtml(
-              secret.created_at || ""
-            )}
-          </small>
-
-        </div>
-
-        <span>
-          ••••••••
-        </span>
-
+    const card = document.createElement('div');
+    card.className = 'secret-card';
+    card.innerHTML = `
+      <div class="secret-card-header"><strong>${row.name}</strong></div>
+      <div class="chip-row">${chips}</div>
+      <div class="inline-grant">
+        <select id="grant-select-${row.name}">
+          <option value="">Grant to...</option>
+          ${options}
+        </select>
+        <button type="button" class="secondary-button" onclick="grantAccess('${row.name}')">Grant</button>
       </div>
     `;
-
+    container.appendChild(card);
   }
-
-
-  if (!data?.length) {
-
-    list.innerHTML = `
-      <div class="secret-item">
-        No secrets have been created yet.
-      </div>
-    `;
-
-  }
-
 }
 
+window.grantAccess = async function (secretName) {
+  const select = document.getElementById(`grant-select-${secretName}`);
+  const runnerId = select.value;
+  if (!runnerId) return;
+  const { error } = await supabase.rpc('grant_secret_to_runner', { secret_name: secretName, runner_id: runnerId });
+  if (error) {
+    alert(error.message);
+    return;
+  }
+  loadSecrets();
+};
+
+window.revokeAccess = async function (secretName, runnerId) {
+  const { error } = await supabase.rpc('revoke_secret_from_runner', {
+    p_secret_name: secretName,
+    p_runner_id: runnerId,
+  });
+  if (error) {
+    alert(error.message);
+    return;
+  }
+  loadSecrets();
+};
 
 window.openSecretModal = async function () {
+  document.getElementById('secret-name').value = '';
+  document.getElementById('secret-value').value = '';
+  document.getElementById('secret-error').textContent = '';
 
-  await loadRunners();
+  const select = document.getElementById('secret-runner');
+  select.innerHTML = `
+    <option value="">Don't grant yet (add access later)</option>
+    <option value="__ALL__">Grant to ALL my Runs-on systems</option>
+  `;
+  const runners = await fetchRunnersCache();
+  for (const r of runners) {
+    const opt = document.createElement('option');
+    opt.value = r.id;
+    opt.textContent = r.name;
+    select.appendChild(opt);
+  }
 
-  document.getElementById(
-    "secret-modal"
-  ).hidden = false;
-
+  document.getElementById('secret-modal').hidden = false;
 };
-
 
 window.closeSecretModal = function () {
-
-  document.getElementById(
-    "secret-modal"
-  ).hidden = true;
-
+  document.getElementById('secret-modal').hidden = true;
 };
-
 
 window.createSecret = async function (event) {
-
   event.preventDefault();
+  const name = document.getElementById('secret-name').value.trim();
+  const value = document.getElementById('secret-value').value;
+  const choice = document.getElementById('secret-runner').value;
+  const errorBox = document.getElementById('secret-error');
+  errorBox.textContent = '';
 
-
-  const name =
-    document.getElementById(
-      "secret-name"
-    ).value.trim();
-
-  const value =
-    document.getElementById(
-      "secret-value"
-    ).value;
-
-  const runnerId =
-    document.getElementById(
-      "secret-runner"
-    ).value;
-
-
-  if (!name || !value) {
-
-    document.getElementById(
-      "secret-error"
-    ).textContent =
-      "Secret name and value are required.";
-
-    return;
-  }
-
-
-  /*
-   * IMPORTANT SECURITY NOTE:
-   *
-   * Do NOT store the actual secret value
-   * directly in a normal Supabase table.
-   *
-   * Production implementation should send
-   * this through an Edge Function/backend
-   * that encrypts it using a server-side key.
-   *
-   * The browser must never receive the
-   * encryption master key.
-   */
-
-  const {
-    error
-  } = await supabase.functions.invoke(
-    "secret-create",
-    {
-      body: {
-        name,
-        value,
-        runner_id:
-          runnerId || null
-      }
-    }
-  );
-
-
+  const { error } = await supabase.rpc('add_online_secret', { secret_name: name, secret_value: value });
   if (error) {
-
-    document.getElementById(
-      "secret-error"
-    ).textContent =
-      error.message;
-
+    errorBox.textContent = error.message;
     return;
   }
 
-
-  document.querySelector(
-    "#secret-modal form"
-  ).reset();
-
+  if (choice === '__ALL__') {
+    const runners = await fetchRunnersCache();
+    for (const r of runners) {
+      await supabase.rpc('grant_secret_to_runner', { secret_name: name, runner_id: r.id });
+    }
+  } else if (choice) {
+    const { error: grantError } = await supabase.rpc('grant_secret_to_runner', {
+      secret_name: name,
+      runner_id: choice,
+    });
+    if (grantError) {
+      errorBox.textContent = grantError.message;
+      return;
+    }
+  }
 
   closeSecretModal();
-
-  await loadSecrets();
-
+  loadSecrets();
 };
 
-
-/* =========================================
-   RUNNER OPTIONS
-========================================= */
-
-async function loadRunnerOptions(
-  runners
-) {
-
-  const select =
-    document.getElementById(
-      "secret-runner"
-    );
-
-
-  select.innerHTML = `
-    <option value="">
-      All permitted systems
-    </option>
-  `;
-
-
-  for (const runner of runners) {
-
-    const option =
-      document.createElement("option");
-
-    option.value =
-      runner.id;
-
-    option.textContent =
-      `${runner.name} (${runner.runs_on})`;
-
-    select.appendChild(option);
-
-  }
-
-}
-
-
-/* =========================================
-   BUILDS
-========================================= */
+// ---------- builds ----------
 
 async function loadBuilds() {
-
-  const body =
-    document.getElementById(
-      "builds-body"
-    );
-
-
-  const {
-    data,
-    error
-  } = await supabase
-    .from("builds")
-    .select("*")
-    .order(
-      "created_at",
-      {
-        ascending: false
-      }
-    )
-    .limit(50);
-
-
+  const { data, error } = await supabase.from('builds').select('*').order('created_at', { ascending: false }).limit(50);
+  const body = document.getElementById('builds-body');
+  body.innerHTML = '';
   if (error) {
-
-    body.innerHTML = `
-      <tr>
-        <td colspan="5">
-          ${escapeHtml(error.message)}
-        </td>
-      </tr>
-    `;
-
+    body.innerHTML = `<tr><td colspan="5">${error.message}</td></tr>`;
     return;
   }
-
-
-  body.innerHTML = "";
-
-
-  for (const build of data || []) {
-
-    body.innerHTML += `
-      <tr>
-
-        <td class="status-${escapeHtml(
-          build.status
-        )}">
-          ${escapeHtml(
-            build.status
-          )}
-        </td>
-
-        <td>
-          ${escapeHtml(
-            build.runs_on || ""
-          )}
-
-          ${escapeHtml(
-            build.runs_on_version || ""
-          )}
-        </td>
-
-        <td>
-          ${escapeHtml(
-            build.start_time ||
-            build.created_at ||
-            ""
-          )}
-        </td>
-
-        <td>
-          ${escapeHtml(
-            build.duration_secs ??
-            ""
-          )}
-        </td>
-
-        <td>
-          <button
-            class="secondary-button"
-            onclick="showBuild('${escapeHtml(
-              build.id
-            )}')"
-          >
-            Logs
-          </button>
-        </td>
-
-      </tr>
-    `;
-
+  for (const b of data) {
+    body.innerHTML += `<tr>
+      <td class="status-${b.status}">${b.status}</td>
+      <td>${b.runs_on || ''} ${b.runs_on_version || ''}</td>
+      <td>${b.start_time || b.created_at}</td>
+      <td>${b.duration_secs ?? ''}</td>
+      <td><button type="button" class="secondary-button" onclick="showBuild('${b.id}')">Logs</button></td>
+    </tr>`;
   }
-
 }
 
-
-window.showBuild = async function (
-  buildId
-) {
-
-  const detail =
-    document.getElementById(
-      "build-detail"
-    );
-
-
-  const {
-    data,
-    error
-  } = await supabase
-    .from("build_logs")
-    .select("line")
-    .eq("build_id", buildId)
-    .order(
-      "id",
-      {
-        ascending: true
-      }
-    );
-
-
+window.showBuild = async function (buildId) {
+  const { data, error } = await supabase
+    .from('build_logs')
+    .select('line')
+    .eq('build_id', buildId)
+    .order('id', { ascending: true });
+  const detail = document.getElementById('build-detail');
   if (error) {
-
-    detail.innerHTML =
-      `<p>${escapeHtml(
-        error.message
-      )}</p>`;
-
+    detail.innerHTML = `<p class="error-text">${error.message}</p>`;
     return;
   }
-
-
-  const log =
-    (data || [])
-      .map(row => row.line)
-      .join("\n");
-
-
-  detail.innerHTML = `
-    <h3>Build ${escapeHtml(
-      buildId
-    )}</h3>
-
-    <pre>${escapeHtml(
-      log
-    )}</pre>
-  `;
-
+  detail.innerHTML = `<h3>Build ${buildId}</h3><pre>${data.map((r) => r.line).join('\n')}</pre>`;
 };
-
-
-/* =========================================
-   SECURITY HELPERS
-========================================= */
-
-function escapeHtml(value) {
-
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-
-}
-
-
-/* =========================================
-   AUTH STATE
-========================================= */
-
-supabase.auth.onAuthStateChange(
-  async () => {
-    await refreshUserBox();
-  }
-);
-
 
 refreshUserBox();

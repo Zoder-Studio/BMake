@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 mod pager;
 mod syntax_docs;
 mod editor_setup;
@@ -127,12 +128,11 @@ enum SecretAction {
     Add { name: String },
     List,
     Remove { name: String },
-    /// Add/update a secret in the BMake Online Secret Store (cloud, requires login)
     AddOnline { name: String },
-    /// List secret names in the BMake Online Secret Store
     ListOnline,
-    /// Grant a Runner permission to use a cloud secret
     Grant { name: String, runner_id: String },
+    /// List which Runners are granted access to a cloud secret
+    ListGrants { name: String },
 }
 
 #[derive(Subcommand)]
@@ -176,6 +176,7 @@ fn main() {
             SecretAction::AddOnline { name } => cmd_secret_add_online(&name),
             SecretAction::ListOnline => cmd_secret_list_online(),
             SecretAction::Grant { name, runner_id } => cmd_secret_grant(&name, &runner_id),
+            SecretAction::ListGrants { name } => cmd_secret_list_grants(&name),
         },
     };
 
@@ -296,54 +297,17 @@ fn cmd_run(
         handle_remote(&remote, &bmake_file)?;
     }
 
-    // Resolve Secret before Tool/Dependency, per the pre-flight order:
-    // Parse -> Validate -> Resolve Secret -> Resolve Tool -> Resolve Runner
-    // -> Build Dependency Graph -> Execute. Only the specific secrets this
-    // file references are ever decrypted.
-    let secret_names = bmake_engine::values::referenced_secret_names(&bmake_file);
-    let mut secret_values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    if !secret_names.is_empty() {
-        let is_ci = std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some();
-        let remote_ci = bmake_file.remote.as_deref() == Some("CI");
+    let (tx, rx) = std::sync::mpsc::channel::<bmake_engine::events::TaskEvent>();
+    let ui_opts = ui::UiOptions::detect(no_color, no_animation);
 
-        if remote_ci || is_ci {
-            // Never uploads Local secrets to CI automatically — only reads
-            // whatever the workflow author already exposed as env vars.
-            println!("SECRET: adding secret from CI secret store");
-            for name in &secret_names {
-                let Ok(value) = std::env::var(name) else {
-                    anyhow::bail!(
-                        "Secret \"{}\" was not found.\n\nFor CI, expose it as an environment variable in your workflow, e.g.:\n\n    env:\n      {}: ${{{{ secrets.{} }}}}",
-                        name,
-                        name,
-                        name
-                    );
-                };
-                secret_values.insert(name.clone(), value);
-            }
-        } else if let Ok(Some(session)) = bmake_engine::cloud::load_session() {
-            println!("SECRET: adding secret from BMake Secret Store");
-            let runner_id = std::env::var("BMAKE_RUNNER_ID").map_err(|_| {
-                anyhow::anyhow!(
-                    "BMake Online Secret Store requires the build to run through a registered Runner. Start one with 'bmake runner start <id>', or use a local secret.bm.locksys vault instead."
-                )
-            })?;
-            for name in &secret_names {
-                let value = bmake_engine::cloud::get_online_secret(&session, name, &runner_id)?;
-                secret_values.insert(name.clone(), value);
-            }
-        } else {
-            println!("SECRET: adding secret from secret.bm.locksys");
-            let vault = bmake_engine::vault::Vault::at(&project_dir);
-            if !vault.exists() {
-                let first = secret_names.iter().next().cloned().unwrap_or_default();
-                anyhow::bail!("Secret \"{}\" was not found.\n\nCreate it with:\n\n    bmake add secret {}", first, first);
-            }
-            let passphrase = rpassword::prompt_password(" vault passphrase: ")?;
-            let names_vec: Vec<String> = secret_names.iter().cloned().collect();
-            secret_values = vault.get_secrets(&passphrase, &names_vec)?;
+    let secret_values = match resolve_secrets_with_events(&bmake_file, &project_dir, &tx) {
+        Ok(v) => v,
+        Err(e) => {
+            drop(tx);
+            ui::render_loop(rx, &ui_opts);
+            return Err(e);
         }
-    }
+    };
     let (_, secret_values_used) = bmake_engine::values::resolve(&mut bmake_file, &secret_values)?;
 
     let paths = BMakePaths::new(&project_dir);
@@ -363,9 +327,6 @@ fn cmd_run(
     let start = bmake_engine::metadata::now_unix();
     let build_id = bmake_engine::metadata::new_build_id();
     println!(" Build ID: {}", build_id);
-
-    let (tx, rx) = std::sync::mpsc::channel::<bmake_engine::events::TaskEvent>();
-    let ui_opts = ui::UiOptions::detect(no_color, no_animation);
 
     let file_for_exec = bmake_file.clone();
     let project_dir_for_exec = project_dir.clone();
@@ -523,6 +484,87 @@ fn write_lockfile(file: &bmake_ast::BMakeFile, paths: &BMakePaths) -> Result<()>
     bmake_engine::lockfile::write(paths, &lock)
 }
 
+fn resolve_secrets_with_events(
+    bmake_file: &bmake_ast::BMakeFile,
+    project_dir: &Path,
+    tx: &bmake_engine::events::EventSender,
+) -> Result<HashMap<String, String>> {
+    use bmake_engine::events::{emit, TaskEvent};
+
+    let secret_names = bmake_engine::values::referenced_secret_names(bmake_file);
+    let mut secret_values: HashMap<String, String> = HashMap::new();
+    if secret_names.is_empty() {
+        return Ok(secret_values);
+    }
+
+    let is_ci = std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some();
+    let remote_ci = bmake_file.remote.as_deref() == Some("CI");
+    let source = if remote_ci || is_ci {
+        "CI secret store"
+    } else if bmake_engine::cloud::load_session().ok().flatten().is_some() {
+        "BMake Secret Store"
+    } else {
+        "secret.bm.locksys"
+    };
+
+    for name in &secret_names {
+        emit(tx, TaskEvent::SecretResolving { name: name.clone(), source: source.to_string() });
+    }
+
+    let outcome: Result<()> = (|| {
+        if remote_ci || is_ci {
+            // Never uploads Local secrets to CI automatically — only reads
+            // whatever the workflow author already exposed as env vars.
+            for name in &secret_names {
+                let Ok(value) = std::env::var(name) else {
+                    anyhow::bail!(
+                        "Secret \"{}\" was not found.\n\nFor CI, expose it as an environment variable in your workflow, e.g.:\n\n    env:\n      {}: ${{{{ secrets.{} }}}}",
+                        name,
+                        name,
+                        name
+                    );
+                };
+                secret_values.insert(name.clone(), value);
+            }
+        } else if let Ok(Some(session)) = bmake_engine::cloud::load_session() {
+            let runner_id = std::env::var("BMAKE_RUNNER_ID").map_err(|_| {
+                anyhow::anyhow!(
+                    "BMake Online Secret Store requires the build to run through a registered Runner. Start one with 'bmake runner start <id>', or use a local secret.bm.locksys vault instead."
+                )
+            })?;
+            for name in &secret_names {
+                let value = bmake_engine::cloud::get_online_secret(&session, name, &runner_id)?;
+                secret_values.insert(name.clone(), value);
+            }
+        } else {
+            let vault = bmake_engine::vault::Vault::at(project_dir);
+            if !vault.exists() {
+                let first = secret_names.iter().next().cloned().unwrap_or_default();
+                anyhow::bail!("Secret \"{}\" was not found.\n\nCreate it with:\n\n    bmake add secret {}", first, first);
+            }
+            let passphrase = rpassword::prompt_password(" vault passphrase: ")?;
+            let names_vec: Vec<String> = secret_names.iter().cloned().collect();
+            secret_values = vault.get_secrets(&passphrase, &names_vec)?;
+        }
+        Ok(())
+    })();
+
+    match outcome {
+        Ok(()) => {
+            for name in &secret_names {
+                emit(tx, TaskEvent::SecretResolved { name: name.clone() });
+            }
+            Ok(secret_values)
+        }
+        Err(e) => {
+            for name in &secret_names {
+                emit(tx, TaskEvent::SecretFailed { name: name.clone(), error: e.to_string() });
+            }
+            Err(e)
+        }
+    }
+}
+
 fn cmd_init(kts: bool) -> Result<()> {
     let filename = if kts { "BMake.bm.kts" } else { "BMake.bm" };
     let path = PathBuf::from(filename);
@@ -572,6 +614,8 @@ fn cmd_validate(file: Option<PathBuf>) -> Result<()> {
     };
     println!("✓ Syntax valid");
 
+    let mut warnings = 0u32;
+
     match bmake_engine::values::resolve_values_only(&mut bmake_file) {
         Ok(report) => {
             println!("✓ Value references valid");
@@ -614,8 +658,6 @@ fn cmd_validate(file: Option<PathBuf>) -> Result<()> {
         );
     }
 
-    let mut warnings = 0u32;
-
     for dep in &bmake_file.dependencies {
         if which::which(&dep.need).is_ok() {
             println!("✓ Dependency '{}' found ({})", dep.name, dep.need);
@@ -655,6 +697,11 @@ fn cmd_validate(file: Option<PathBuf>) -> Result<()> {
         }
     }
 
+    if bmake_file.sub_system.is_some() && bmake_file.system.is_none() {
+        println!("⚠ Sub-System is set but System is missing — Sub-System has nothing to attach to");
+        warnings += 1;
+    }
+
     if bmake_file.remote.as_deref() == Some("Local") && bmake_file.runs_on.is_none() {
         println!("⚠ Remote: Local is set but Runs-on: is missing");
         warnings += 1;
@@ -665,10 +712,6 @@ fn cmd_validate(file: Option<PathBuf>) -> Result<()> {
         );
     }
 
-    if bmake_file.sub_system.is_some() && bmake_file.system.is_none() {
-        println!("⚠ Sub-System is set but System is missing — Sub-System has nothing to attach to");
-        warnings += 1;
-    }
     println!();
     if warnings == 0 {
         println!("BMake file is valid.");
@@ -1002,6 +1045,21 @@ fn cmd_secret_grant(name: &str, runner_id: &str) -> Result<()> {
     };
     bmake_engine::cloud::grant_secret_to_runner(&session, name, runner_id)?;
     println!("✓ Runner {} can now request secret {}", runner_id, name);
+    Ok(())
+}
+
+fn cmd_secret_list_grants(name: &str) -> Result<()> {
+    let Some(session) = bmake_engine::cloud::load_session()? else {
+        anyhow::bail!("Not logged in. Run 'bmake login' first — Runner-secret grants are only tracked in the BMake Online Secret Store.");
+    };
+    let grants = bmake_engine::cloud::list_secret_grants(&session, name)?;
+    println!("Runners with access to secret '{}':\n", name);
+    if grants.is_empty() {
+        println!("  (none — grant one with: bmake secret grant {} <runner-id>)", name);
+    }
+    for (id, runner_name) in grants {
+        println!("  {} [{}]", runner_name, id);
+    }
     Ok(())
 }
 

@@ -87,6 +87,15 @@ pub fn render_loop(rx: Receiver<TaskEvent>, opts: &UiOptions) {
                     println!("  {}", styled(opts, &format!("{} : {}", name, status), color));
                 }
             }
+            TaskEvent::SecretResolving { name, source } => {
+                println!("{}", styled(opts, &format!("SECRET: resolving {} from {}", name, source), Color::Cyan));
+            }
+            TaskEvent::SecretResolved { name } => {
+                println!("{}", styled(opts, &format!("SECRET: {} resolved", name), Color::Green));
+            }
+            TaskEvent::SecretFailed { name, error } => {
+                println!("{}", styled(opts, &format!("SECRET: {} failed — {}", name, error), Color::Red));
+            }
         }
         let _ = stdout().flush();
     }

@@ -27,7 +27,6 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
             continue;
         }
         if t == "Stop" {
-            i += 1;
             break;
         }
         if t.starts_with("<Task:") {

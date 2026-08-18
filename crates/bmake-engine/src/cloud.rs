@@ -369,6 +369,22 @@ pub fn get_online_secret(session: &Session, name: &str, runner_id: &str) -> Resu
         .ok_or_else(|| anyhow::anyhow!("Secret \"{}\" was not found.", name))
 }
 
+pub fn list_secret_grants(session: &Session, name: &str) -> Result<Vec<(String, String)>> {
+    let body = rpc(session, "list_secret_grants", json!({ "p_secret_name": name }))?;
+    Ok(body
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| {
+                    let id = v["runner_id"].as_str()?.to_string();
+                    let name = v["runner_name"].as_str()?.to_string();
+                    Some((id, name))
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 fn urlencode(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c.to_string() } else { format!("%{:02X}", c as u32) })

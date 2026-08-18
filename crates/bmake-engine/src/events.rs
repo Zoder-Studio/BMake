@@ -17,6 +17,13 @@ pub enum TaskEvent {
     TaskSucceeded { task: String },
     TaskFailed { task: String, error: String },
     BuildFinished { results: Vec<(String, String)> },
+    /// `source` is always a safe label ("secret.bm.locksys", "BMake Secret
+    /// Store", "CI secret store") — never a value. `error` on
+    /// SecretFailed is likewise constructed only from names/reasons
+    /// throughout this codebase, never from the secret's plaintext.
+    SecretResolving { name: String, source: String },
+    SecretResolved { name: String },
+    SecretFailed { name: String, error: String },
 }
 
 pub type EventSender = Sender<TaskEvent>;
