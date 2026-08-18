@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
 use bmake_ast::{BMakeFile, ValueNode};
-use core::fmt::Debug;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+#[derive(Debug)]
 pub struct UsageReport {
     pub used_paths: HashSet<String>,
 }
