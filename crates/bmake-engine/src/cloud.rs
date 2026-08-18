@@ -318,6 +318,57 @@ pub fn fetch_logs_since(session: &Session, build_id: &str, offset: usize) -> Res
     Ok(rows.into_iter().filter_map(|r| r["line"].as_str().map(|s| s.to_string())).collect())
 }
 
+/// Calls a Postgres RPC and surfaces the database's error message directly
+/// (Postgres `raise exception` text — e.g. "Secret access denied...")
+/// instead of a raw HTTP body dump.
+fn rpc(session: &Session, name: &str, args: Value) -> Result<Value> {
+    let client = reqwest::blocking::Client::new();
+    let mut req = client.post(format!("{}/rest/v1/rpc/{}", session.supabase_url, name)).json(&args);
+    for (k, v) in auth_headers(session) {
+        req = req.header(k, v);
+    }
+    let resp = req.send()?;
+    if !resp.status().is_success() {
+        let text = resp.text().unwrap_or_default();
+        let message = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v["message"].as_str().map(|s| s.to_string()))
+            .unwrap_or(text);
+        bail!("{}", message);
+    }
+    Ok(resp.json()?)
+}
+
+/// Adds/updates a secret in the BMake Online Secret Store (Supabase Vault
+/// server-side — the value is never stored in this codebase's own format).
+pub fn add_online_secret(session: &Session, name: &str, value: &str) -> Result<()> {
+    rpc(session, "add_online_secret", json!({ "secret_name": name, "secret_value": value }))?;
+    Ok(())
+}
+
+pub fn list_online_secrets(session: &Session) -> Result<Vec<String>> {
+    let body = rpc(session, "list_online_secrets", json!({}))?;
+    Ok(body
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v["name"].as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default())
+}
+
+/// Grants a Runner permission to request a secret. Without this, that
+/// Runner's `get_online_secret` calls for this name are rejected — server
+/// side, not just in the CLI.
+pub fn grant_secret_to_runner(session: &Session, name: &str, runner_id: &str) -> Result<()> {
+    rpc(session, "grant_secret_to_runner", json!({ "secret_name": name, "runner_id": runner_id }))?;
+    Ok(())
+}
+
+pub fn get_online_secret(session: &Session, name: &str, runner_id: &str) -> Result<String> {
+    let body = rpc(session, "get_online_secret", json!({ "secret_name": name, "requesting_runner_id": runner_id }))?;
+    body.as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("Secret \"{}\" was not found.", name))
+}
+
 fn urlencode(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c.to_string() } else { format!("%{:02X}", c as u32) })

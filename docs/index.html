@@ -1,517 +1,87 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-
-  <title>BMake Control Plane</title>
-
-  <link rel="stylesheet" href="./css/style.css">
+<meta charset="utf-8" />
+<title>BMake Control Plane</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="style.css" />
 </head>
-
 <body>
-
-<header class="topbar">
-  <div class="brand">
-    <div class="brand-icon">B</div>
-
-    <div>
-      <h1>BMake</h1>
-      <span>Control Plane</span>
-    </div>
-  </div>
-
+<header>
+  <h1>BMake Control Plane</h1>
   <div id="user-box"></div>
 </header>
-
 <main>
+  <div id="login-view" class="card">
+    <h2>Sign in</h2>
+    <p>Same account you use with <code>bmake login</code>.</p>
+    <div class="form-column">
+      <input id="email" type="email" placeholder="Email" />
+      <input id="password" type="password" placeholder="Password" />
+      <button onclick="doLogin()">Sign in</button>
+      <div id="login-error" class="error-text"></div>
+    </div>
+  </div>
 
-  <!-- AUTH -->
-
-  <section id="login-view" class="auth-page">
-
-    <div class="auth-card">
-
-      <div class="auth-logo">B</div>
-
-      <div class="auth-heading">
-        <h2 id="auth-title">Welcome back</h2>
-
-        <p id="auth-subtitle">
-          Sign in to your BMake Control Plane.
-        </p>
-      </div>
-
-      <div class="auth-switch">
-
-        <button
-          id="signin-tab"
-          class="auth-switch-active"
-          onclick="setAuthMode('signin')"
-        >
-          Sign in
-        </button>
-
-        <button
-          id="signup-tab"
-          onclick="setAuthMode('signup')"
-        >
-          Create account
-        </button>
-
-      </div>
-
-      <form id="auth-form" onsubmit="handleAuth(event)">
-
-        <label for="email">
-          Email
-        </label>
-
-        <input
-          id="email"
-          type="email"
-          autocomplete="email"
-          placeholder="you@example.com"
-          required
-        >
-
-        <label for="password">
-          Password
-        </label>
-
-        <input
-          id="password"
-          type="password"
-          autocomplete="current-password"
-          placeholder="••••••••"
-          minlength="8"
-          required
-        >
-
-        <div id="confirm-password-wrap">
-
-          <label for="confirm-password">
-            Confirm password
-          </label>
-
-          <input
-            id="confirm-password"
-            type="password"
-            autocomplete="new-password"
-            placeholder="••••••••"
-            minlength="8"
-          >
-
-        </div>
-
-        <button
-          id="auth-submit"
-          class="primary-button"
-          type="submit"
-        >
-          Sign in
-        </button>
-
-        <div id="auth-message"></div>
-
-      </form>
-
-      <div class="auth-footer">
-        BMake Control Plane
-      </div>
-
+  <div id="app-view">
+    <div class="tabs">
+      <button id="tab-runners" onclick="showTab('runners')" class="active">Runners</button>
+      <button id="tab-builds" onclick="showTab('builds')">Builds</button>
+      <button id="tab-secrets" onclick="showTab('secrets')">Secrets</button>
     </div>
 
-  </section>
+    <div id="view-runners" class="card">
+      <h2>Runners</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Runs-on</th><th>Version</th><th>Arch</th><th>Status</th><th>ID</th></tr></thead>
+        <tbody id="runners-body"></tbody>
+      </table>
+    </div>
 
-
-  <!-- APPLICATION -->
-
-  <section id="app-view">
-
-    <nav class="tabs">
-
-      <button
-        id="tab-runners"
-        class="tab active"
-        onclick="showTab('runners')"
-      >
-        Runs-on
-      </button>
-
-      <button
-        id="tab-secrets"
-        class="tab"
-        onclick="showTab('secrets')"
-      >
-        Secrets
-      </button>
-
-      <button
-        id="tab-builds"
-        class="tab"
-        onclick="showTab('builds')"
-      >
-        Builds
-      </button>
-
-      <button
-        id="tab-settings"
-        class="tab"
-        onclick="showTab('settings')"
-      >
-        Settings
-      </button>
-
-    </nav>
-
-
-    <!-- RUNNERS -->
-
-    <section
-      id="view-runners"
-      class="panel"
-    >
-
-      <div class="panel-header">
-
-        <div>
-          <h2>Runs-on systems</h2>
-
-          <p>
-            Manage BMake execution environments.
-          </p>
-        </div>
-
-        <button
-          class="primary-button"
-          onclick="openRunnerModal()"
-        >
-          Add Runs-on
-        </button>
-
-      </div>
-
-      <div class="table-container">
-
-        <table>
-
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Runs-on</th>
-              <th>Version</th>
-              <th>Arch</th>
-              <th>Status</th>
-              <th>ID</th>
-            </tr>
-          </thead>
-
-          <tbody id="runners-body"></tbody>
-
-        </table>
-
-      </div>
-
-    </section>
-
-
-    <!-- SECRETS -->
-
-    <section
-      id="view-secrets"
-      class="panel"
-      hidden
-    >
-
-      <div class="panel-header">
-
-        <div>
-          <h2>Secrets</h2>
-
-          <p>
-            Secure secrets available to your BMake Runs-on systems.
-          </p>
-        </div>
-
-        <button
-          class="primary-button"
-          onclick="openSecretModal()"
-        >
-          Add Secret
-        </button>
-
-      </div>
-
-      <div class="security-notice">
-
-        <strong>Secure storage</strong>
-
-        <span>
-          Secret values are never displayed after creation.
-        </span>
-
-      </div>
-
-      <div
-        id="secrets-list"
-        class="secret-list"
-      ></div>
-
-    </section>
-
-
-    <!-- BUILDS -->
-
-    <section
-      id="view-builds"
-      class="panel"
-      hidden
-    >
-
-      <div class="panel-header">
-
-        <div>
-          <h2>Builds</h2>
-
-          <p>
-            Monitor BMake builds and execution logs.
-          </p>
-        </div>
-
-      </div>
-
-      <div class="table-container">
-
-        <table>
-
-          <thead>
-            <tr>
-              <th>Status</th>
-              <th>Runs-on</th>
-              <th>Started</th>
-              <th>Duration</th>
-              <th></th>
-            </tr>
-          </thead>
-
-          <tbody id="builds-body"></tbody>
-
-        </table>
-
-      </div>
-
+    <div id="view-builds" class="card" style="display:none;">
+      <h2>Builds</h2>
+      <table>
+        <thead><tr><th>Status</th><th>Runs-on</th><th>Started</th><th>Duration</th><th></th></tr></thead>
+        <tbody id="builds-body"></tbody>
+      </table>
       <div id="build-detail"></div>
+    </div>
 
-    </section>
+    <div id="view-secrets" class="card" style="display:none;">
+      <h2>Secrets</h2>
+      <p class="muted">Values are never shown again after saving — only names.</p>
 
-
-    <!-- SETTINGS -->
-
-    <section
-      id="view-settings"
-      class="panel"
-      hidden
-    >
-
-      <div class="panel-header">
-
-        <div>
-          <h2>Settings</h2>
-
-          <p>
-            Manage your BMake Control Plane account.
-          </p>
+      <div class="secret-forms">
+        <div class="secret-form">
+          <h3>Add secret</h3>
+          <div class="form-column">
+            <input id="secret-name" placeholder="Secret name" />
+            <input id="secret-value" type="password" placeholder="Secret value" />
+            <button onclick="addSecret()">Add Secret</button>
+            <div id="secret-add-error" class="error-text"></div>
+          </div>
         </div>
 
+        <div class="secret-form">
+          <h3>Grant to Runner</h3>
+          <div class="form-column">
+            <input id="grant-secret-name" placeholder="Secret name" />
+            <input id="grant-runner-id" placeholder="Runner ID" />
+            <button onclick="grantSecret()">Grant Access</button>
+            <div id="secret-grant-error" class="error-text"></div>
+          </div>
+        </div>
       </div>
 
-      <div class="settings-card">
-
-        <span class="settings-label">
-          Account
-        </span>
-
-        <strong id="settings-email">
-          —
-        </strong>
-
-      </div>
-
-    </section>
-
-  </section>
-
+      <h3 class="secrets-list-heading">Existing secrets</h3>
+      <table>
+        <thead><tr><th>Name</th></tr></thead>
+        <tbody id="secrets-body"></tbody>
+      </table>
+    </div>
+  </div>
 </main>
 
-
-<!-- RUNNER MODAL -->
-
-<div
-  id="runner-modal"
-  class="modal"
-  hidden
->
-
-  <div class="modal-card">
-
-    <div class="modal-header">
-      <h2>Create Runs-on system</h2>
-
-      <button onclick="closeRunnerModal()">×</button>
-    </div>
-
-    <form onsubmit="createRunner(event)">
-
-      <label>Name</label>
-
-      <input
-        id="runner-name"
-        placeholder="android-builder"
-        required
-      >
-
-      <label>Runs-on</label>
-
-      <input
-        id="runner-runs-on"
-        placeholder="ubuntu"
-        required
-      >
-
-      <label>Version</label>
-
-      <input
-        id="runner-version"
-        placeholder="24.04"
-      >
-
-      <label>Architecture</label>
-
-      <input
-        id="runner-arch"
-        placeholder="x86_64"
-      >
-
-      <div class="modal-actions">
-
-        <button
-          type="button"
-          class="secondary-button"
-          onclick="closeRunnerModal()"
-        >
-          Cancel
-        </button>
-
-        <button
-          type="submit"
-          class="primary-button"
-        >
-          Create Runs-on
-        </button>
-
-      </div>
-
-      <div id="runner-error"></div>
-
-    </form>
-
-  </div>
-
-</div>
-
-
-<!-- SECRET MODAL -->
-
-<div
-  id="secret-modal"
-  class="modal"
-  hidden
->
-
-  <div class="modal-card">
-
-    <div class="modal-header">
-
-      <div>
-        <h2>Add Secret</h2>
-
-        <p>
-          Secret values are encrypted and never shown again.
-        </p>
-      </div>
-
-      <button onclick="closeSecretModal()">×</button>
-
-    </div>
-
-    <form onsubmit="createSecret(event)">
-
-      <label>
-        Secret name
-      </label>
-
-      <input
-        id="secret-name"
-        placeholder="AndroidSigning"
-        required
-      >
-
-      <label>
-        Secret value
-      </label>
-
-      <input
-        id="secret-value"
-        type="password"
-        placeholder="Enter secret value"
-        required
-      >
-
-      <label>
-        Allowed Runs-on
-      </label>
-
-      <select id="secret-runner">
-
-        <option value="">
-          All permitted systems
-        </option>
-
-      </select>
-
-      <div class="modal-actions">
-
-        <button
-          type="button"
-          class="secondary-button"
-          onclick="closeSecretModal()"
-        >
-          Cancel
-        </button>
-
-        <button
-          type="submit"
-          class="primary-button"
-        >
-          Add Secret
-        </button>
-
-      </div>
-
-      <div id="secret-error"></div>
-
-    </form>
-
-  </div>
-
-</div>
-
-
-<script
-  type="module"
-  src="./js/app.js"
-></script>
-
+<script type="module" src="script.js"></script>
 </body>
 </html>
