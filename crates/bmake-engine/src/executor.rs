@@ -160,7 +160,7 @@ pub fn run_task(
     events: &EventSender,
     secrets_to_mask: &HashSet<String>,
 ) -> Result<BuildStatus> {
-    emit(events, TaskEvent::TaskStarted { task: task.name.clone() });
+    emit(events, TaskEvent::TaskStarted { task: task.name.clone(), label: task.flow_label.clone() });
 
     for cmd in &task.before {
         run_shell(cmd, file, task, project_dir, None, paths, build_id, events, secrets_to_mask)?;
@@ -205,7 +205,7 @@ pub fn run_task(
 
         if !succeeded {
             let error = last_err.unwrap().to_string();
-            emit(events, TaskEvent::TaskFailed { task: task.name.clone(), error });
+            emit(events, TaskEvent::TaskFailed { task: task.name.clone(), error, label: task.flow_label.clone() });
             return Ok(BuildStatus::Failed);
         }
     }
@@ -231,6 +231,19 @@ pub fn run_task(
         }
     }
 
+    if task.flow_label.is_some() {
+        for output in &task.outputs {
+            if resolve_artifact(project_dir, output).is_none() {
+                let msg = format!(
+                    "Plugin Flow completed successfully,\nbut declared output was not produced:\n\n{}",
+                    output
+                );
+                emit(events, TaskEvent::TaskFailed { task: task.name.clone(), error: msg.clone(), label: task.flow_label.clone() });
+                return Ok(BuildStatus::Failed);
+            }
+        }
+    }
+
     if !task.inputs.is_empty() && !task.outputs.is_empty() {
         if let Err(e) = incremental::record(paths, project_dir, task) {
             emit(
@@ -243,7 +256,7 @@ pub fn run_task(
         }
     }
 
-    emit(events, TaskEvent::TaskSucceeded { task: task.name.clone() });
+    emit(events, TaskEvent::TaskSucceeded { task: task.name.clone(), label: task.flow_label.clone() });
     Ok(BuildStatus::Success)
 }
 

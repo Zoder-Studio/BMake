@@ -3,6 +3,7 @@ pub mod cloud;
 pub mod dependency;
 pub mod events;
 pub mod executor;
+pub mod flows;
 pub mod graph;
 pub mod incremental;
 pub mod kts;

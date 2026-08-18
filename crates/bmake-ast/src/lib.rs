@@ -27,6 +27,33 @@ pub struct ToolReq {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct FlowDef {
+    pub path: String,
+    pub name: String,
+    pub description: String,
+    pub runs_on: Option<String>,
+    pub runs_on_version: Option<String>,
+    pub arch: Option<String>,
+    pub platform: Option<String>,
+    pub shell: Option<String>,
+    pub dependencies: Vec<Dependency>,
+    pub tools: Vec<ToolReq>,
+    pub requires: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+    pub workdir: Option<String>,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    pub artifacts: Vec<String>,
+    pub condition: Option<String>,
+    pub continue_on_error: Option<bool>,
+    pub timeout: Option<u64>,
+    pub commands: Vec<CommandStep>,
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+    pub renames: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct Dependency {
     pub name: String,
     pub need: String,
@@ -48,6 +75,12 @@ pub struct Task {
     pub env: HashMap<String, String>,
     pub timeout: Option<u64>,
     pub continue_on_error: Option<bool>,
+    /// Set only for Tasks materialized from `Uses:` — the flow's `Name:`,
+    /// used by the UI to print "Uses: <path>" / friendly name instead of
+    /// the raw path, and by the executor to gate strict Output verification
+    /// (only flows enforce it, to avoid breaking existing Task Output:
+    /// declarations that are only used for incremental-build caching).
+    pub flow_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -94,6 +127,7 @@ pub struct BMakeFile {
     pub tasks: Vec<Task>,
     pub values: std::collections::BTreeMap<String, ValueNode>,
     pub secrets: Vec<String>,
+    pub uses: Vec<String>,
 }
 
 impl Default for BMakeFile {
@@ -128,6 +162,7 @@ impl Default for BMakeFile {
             tasks: Vec::new(),
             values: std::collections::BTreeMap::new(),
             secrets: Vec::new(),
+            uses: Vec::new(),
         }
     }
 }

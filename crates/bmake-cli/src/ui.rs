@@ -40,9 +40,13 @@ pub fn render_loop(rx: Receiver<TaskEvent>, opts: &UiOptions) {
 
     for event in rx {
         match event {
-            TaskEvent::TaskStarted { task } => {
-                println!("{}", styled(opts, &format!("▶ {}", task), Color::Cyan));
-            }
+            TaskEvent::TaskStarted { task, label } => match &label {
+                Some(name) => {
+                    println!("{}", styled(opts, &format!("Uses: {}", task), Color::Cyan));
+                    println!("{}", styled(opts, &format!("Running: {}", name), Color::Cyan));
+                }
+                None => println!("{}", styled(opts, &format!("▶ {}", task), Color::Cyan)),
+            },
             TaskEvent::TaskSkipped { task, reason } => {
                 println!("{}", styled(opts, &format!("○ {} — skipped ({})", task, reason), Color::DarkGrey));
             }
@@ -69,11 +73,19 @@ pub fn render_loop(rx: Receiver<TaskEvent>, opts: &UiOptions) {
             TaskEvent::TaskInfo { task, message } => {
                 println!("  [{}] {}", task, message);
             }
-            TaskEvent::TaskSucceeded { task } => {
-                println!("{}", styled(opts, &format!("✓ {} finished", task), Color::Green));
+            TaskEvent::TaskSucceeded { task, label } => {
+                let line = match &label {
+                    Some(name) => format!("✓ {}", name),
+                    None => format!("✓ {} finished", task),
+                };
+                println!("{}", styled(opts, &line, Color::Green));
             }
-            TaskEvent::TaskFailed { task, error } => {
-                println!("{}", styled(opts, &format!("✗ {} failed: {}", task, error), Color::Red));
+            TaskEvent::TaskFailed { task, error, label } => {
+                let line = match &label {
+                    Some(name) => format!("✗ {}: {}", name, error),
+                    None => format!("✗ {} failed: {}", task, error),
+                };
+                println!("{}", styled(opts, &line, Color::Red));
             }
             TaskEvent::BuildFinished { results } => {
                 println!("\nBuild summary:");

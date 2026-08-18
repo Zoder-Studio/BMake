@@ -295,5 +295,15 @@ pub fn all_entries() -> Vec<SyntaxEntry> {
             since: "1.0",
             deprecated: None,
         },
+        SyntaxEntry {
+            name: "Uses:",
+            form: "Uses: <flow-path>",
+            purpose: "Runs a reusable Plugin Flow — resolved to .bmake/flows/<flow-path>.bm and materialized into a Task with the flow's path as its name, so it goes through the exact same dependency graph, executor, Value/Secret resolution, and CLI output as any other Task. Never wrapped in <Task: ...>.",
+            scope: "Global only.",
+            example: "Uses: android/build\n\n<Task: Test>\n    Depends-on: android/build\n    Command: ./gradlew test\n</Task>",
+            related: &["Depends-on", "Value:", "Secret:"],
+            since: "1.0",
+            deprecated: None,
+        },
     ]
 }

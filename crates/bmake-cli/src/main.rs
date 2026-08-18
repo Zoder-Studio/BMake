@@ -186,6 +186,33 @@ fn main() {
     }
 }
 
+/// Materializes every `Uses:` reference into a Task and merges its
+/// Dependency/Tool/Require into the project's own — flows go through the
+/// exact same resolvers, never separate ones. Also guards against a flow
+/// name colliding with a regular Task or another flow.
+fn materialize_uses(bmake_file: &mut bmake_ast::BMakeFile, project_dir: &Path) -> Result<()> {
+    let uses = bmake_file.uses.clone();
+    for flow_path in uses {
+        let flow = bmake_engine::flows::resolve_flow(project_dir, &flow_path)?;
+        let task = bmake_engine::flows::materialize_as_task(&flow);
+        bmake_file.tasks.push(task);
+        bmake_file.dependencies.extend(flow.dependencies);
+        bmake_file.tools.extend(flow.tools);
+        bmake_file.requires.extend(flow.requires);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for t in &bmake_file.tasks {
+        if !seen.insert(t.name.as_str()) {
+            anyhow::bail!(
+                "Duplicate Task/Plugin Flow name '{}' — a Task and a Plugin Flow (or two Flows) cannot share the same name.",
+                t.name
+            );
+        }
+    }
+    Ok(())
+}
+
 fn find_bm_file(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(f) = explicit {
         return Ok(f);
@@ -250,6 +277,7 @@ fn cmd_run(
     }
 
     println!(" BMake {} — {}", bmake_file.version, bm_path.display());
+    materialize_uses(&mut bmake_file, &project_dir)?;
 
     if let Some(task_name) = &task {
         if bmake_file.remote.as_deref() == Some("Local") {
@@ -589,6 +617,7 @@ fn cmd_init(kts: bool) -> Result<()> {
 fn cmd_check(file: Option<PathBuf>) -> Result<()> {
     let bm_path = find_bm_file(file)?;
     let bmake_file = parse_bm_or_kts(&bm_path)?;
+    materialize_uses(&mut bmake_file, &project_dir)?;
     println!(" {} is valid", bm_path.display());
     println!("   Version : {}", bmake_file.version);
     println!("   Lang    : {:?}", bmake_file.lang);
@@ -613,6 +642,17 @@ fn cmd_validate(file: Option<PathBuf>) -> Result<()> {
         }
     };
     println!("✓ Syntax valid");
+
+    let project_dir = bm_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    if !bmake_file.uses.is_empty() {
+        match materialize_uses(&mut bmake_file, &project_dir) {
+            Ok(()) => println!("✓ Plugin Flow(s) valid ({})", bmake_file.uses.join(", ")),
+            Err(e) => {
+                println!("✗ Plugin Flow invalid\n");
+                return Err(e);
+            }
+        }
+    }
 
     let mut warnings = 0u32;
 
@@ -751,6 +791,26 @@ fn cmd_list(what: Option<String>) -> Result<()> {
             }
         }
         Some("secrets") => return cmd_secret_list(),
+        Some("flows") => {
+            let flows = bmake_engine::flows::discover_flows(&std::env::current_dir()?);
+            println!("Available Plugin Flows\n");
+            if flows.is_empty() {
+                println!("  (none found under .bmake/flows/)");
+            }
+            for (path, parsed) in flows {
+                match parsed {
+                    Ok(flow) => {
+                        println!("{}", path);
+                        println!("  {}", flow.name);
+                        println!("  {}\n", flow.description);
+                    }
+                    Err(e) => {
+                        println!("{}", path);
+                        println!("  ⚠ invalid: {}\n", e);
+                    }
+                }
+            }
+        }
         Some(other) => anyhow::bail!("Unknown 'bmake list {}'. Try: tasks, tools, dependencies, artifacts", other),
     }
     Ok(())
@@ -759,6 +819,7 @@ fn cmd_list(what: Option<String>) -> Result<()> {
 fn cmd_graph(dot: bool) -> Result<()> {
     let bm_path = find_bm_file(None)?;
     let bmake_file = parse_bm_or_kts(&bm_path)?;
+    materialize_uses(&mut bmake_file, &project_dir)?;
 
     // Validates first — this is where a circular dependency surfaces with
     // the exact "A -> B -> C -> A" chain, and it never loops forever.
@@ -1066,6 +1127,7 @@ fn cmd_secret_list_grants(name: &str) -> Result<()> {
 fn cmd_explain(task_name: String) -> Result<()> {
     let bm_path = find_bm_file(None)?;
     let bmake_file = parse_bm_or_kts(&bm_path)?;
+    materialize_uses(&mut bmake_file, &project_dir)?;
 
     let Some(task) = bmake_file.tasks.iter().find(|t| t.name == task_name) else {
         anyhow::bail!("Task '{}' not found in {}", task_name, bm_path.display());

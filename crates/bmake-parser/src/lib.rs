@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use bmake_ast::*;
 use std::collections::BTreeMap;
 use std::path::Path;
+pub mod flow;
 
 pub fn parse(input: &str) -> Result<BMakeFile> {
     let lines = bmake_lexer::to_lines(input);
@@ -97,6 +98,13 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
             i += 1;
             continue;
         }
+        if let Some(rest) = t.strip_prefix("Uses:") {
+            let path = rest.trim().to_string();
+            validate_flow_path(&path)?;
+            file.uses.push(path);
+            i += 1;
+            continue;
+        }
         if let Some(rest) = t.strip_prefix("Require:") {
             file.requires.push(rest.trim().to_string());
             i += 1;
@@ -155,6 +163,30 @@ fn find_version_tag(lines: &[String]) -> Result<(String, usize)> {
     let version = parse_version_tag(lines[i].trim())
         .ok_or_else(|| anyhow::anyhow!("Expected '<Version: ...>' before Start at line {}", i + 1))?;
     Ok((version, i + 1))
+}
+
+fn validate_flow_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        bail!("'Uses:' requires a flow path");
+    }
+    if path.starts_with('/') || path.starts_with('\\') {
+        bail!("Invalid Plugin Flow path '{}': absolute paths are not allowed", path);
+    }
+    if path.contains('\0') || path.chars().any(|c| c.is_control()) {
+        bail!("Invalid Plugin Flow path '{}': contains control characters", path);
+    }
+    for part in path.split(['/', '\\']) {
+        if part == ".." || part == "." || part.is_empty() {
+            bail!("Invalid Plugin Flow path '{}': path traversal or empty segment is not allowed", path);
+        }
+    }
+    if path.ends_with(".bm") {
+        bail!(
+            "'Uses:' paths should not include the '.bm' extension — write 'Uses: {}' instead",
+            path.trim_end_matches(".bm")
+        );
+    }
+    Ok(())
 }
 
 fn find_start(lines: &[String], mut i: usize) -> Result<usize> {
@@ -270,7 +302,13 @@ fn parse_task(lines: &[String], start: usize, global_env: &std::collections::Has
         if t == "Value:" {
             bail!("'Value:' must be declared at global scope, not inside Task '{}' (line {})", task.name, i + 1);
         }
-
+        if t.starts_with("Uses:") {
+            bail!(
+                "'Uses:' must be declared at global scope, not inside Task '{}' (line {}) — a Plugin Flow is its own execution unit, it isn't wrapped in a Task",
+                task.name,
+                i + 1
+            );
+        }
         if let Some(v) = strip_field(t, "Before") {
             task.before.push(v);
             i += 1;
@@ -391,13 +429,13 @@ fn parse_task(lines: &[String], start: usize, global_env: &std::collections::Has
     bail!("Missing closing '</Task>' for task '{}'", task.name)
 }
 
-fn strip_field(line: &str, field: &str) -> Option<String> {
+pub(crate) fn strip_field(line: &str, field: &str) -> Option<String> {
     let rest = line.strip_prefix(field)?.trim_start();
     let val = rest.strip_prefix(':')?;
     Some(val.trim().to_string())
 }
 
-fn parse_multiline_command(lines: &[String], start: usize) -> Result<(String, usize)> {
+pub(crate) fn parse_multiline_command(lines: &[String], start: usize) -> Result<(String, usize)> {
     let mut parts = Vec::new();
     let mut i = start;
     let n = lines.len();
@@ -530,6 +568,7 @@ fn merge_into(target: &mut BMakeFile, other: BMakeFile) {
     }
     target.tasks.extend(other.tasks);
     target.secrets.extend(other.secrets);
+    target.uses.extend(other.uses);
 }
 
 /// Transpiles a `.bm.kts` source file into a runnable Kotlin script that,
