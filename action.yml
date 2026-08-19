@@ -18,10 +18,24 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - name: Determine tag for this commit
+      id: get_tag
+      run: |
+        TAG=$(git tag --points-at "${{ github.event.workflow_run.head_sha }}" | grep '^v' | head -n 1)
+        if [ -z "$TAG" ]; then
+          echo "No version tag found on this commit. Skipping release."
+          echo "tag=" >> "$GITHUB_OUTPUT"
+        else
+          echo "Found tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Set up Rust toolchain
+      if: steps.get_tag.outputs.tag != ''
       uses: dtolnay/rust-toolchain@stable
 
     - name: Cache BMake CLI build
+      if: steps.get_tag.outputs.tag != ''
       uses: actions/cache@v4
       with:
         path: |
@@ -31,10 +45,12 @@ runs:
         key: bmake-cli-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path)) }}-${{ hashFiles(format('{0}/crates/**/*.rs', github.action_path)) }}
 
     - name: Build BMake CLI
+      if: steps.get_tag.outputs.tag != ''
       shell: bash
       run: cargo build --release --manifest-path "${{ github.action_path }}/Cargo.toml" -p bmake-cli
 
     - name: Run BMake
+      if: steps.get_tag.outputs.tag != ''
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
@@ -46,7 +62,32 @@ runs:
         fi
 
     - name: Upload BMake Artifact
+      if: steps.get_tag.outputs.tag != ''
       uses: actions/upload-artifact@v4
       with:
         name: bmake
         path: ${{ github.action_path }}/target/release/bmake
+
+    - name: Add Version
+      if: steps.get_tag.outputs.tag != ''
+      shell: bash
+      run: |
+        FIND_BMAKE="${{ github.action_path }}/target/release/bmake"
+        TAG="${{ steps.get_tag.outputs.tag }}"
+        if [ -d "$FIND_BMAKE" ]; then
+           echo "BMake found"
+           mkdir releases
+           cp ${{ github.action_path }}/target/release/bmake ${{ github.action_path }}/target/release/releases/
+           mv ${{ github.action_path }}/target/release/releases/bmake bmake-$TAG
+        else
+           echo "cannot find bmake in this directory"
+        fi
+
+    - name: Create GitHub Release
+      if: steps.get_tag.outputs.tag != ''
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.get_tag.outputs.tag }}
+        name: bmake ${{ steps.get_tag.outputs.tag }}
+        files: bmake-${{ steps.get_tag.outputs.tag }}
+        generate_release_notes: true
