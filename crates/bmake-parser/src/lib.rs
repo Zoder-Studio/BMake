@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use bmake_ast::*;
 use std::collections::BTreeMap;
 use std::path::Path;
+
 pub mod flow;
 
 pub fn parse(input: &str) -> Result<BMakeFile> {
@@ -45,6 +46,20 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
             i = next_i;
             continue;
         }
+        if let Some(rest) = t.strip_prefix("Uses:") {
+            let path = rest.trim().to_string();
+            validate_flow_path(&path)?;
+            file.uses.push(path);
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("Run-bm:") {
+            let path = rest.trim().to_string();
+            validate_run_bm_path(&path)?;
+            file.run_bm.push(path);
+            i += 1;
+            continue;
+        }
         if let Some(rest) = t.strip_prefix("import") {
             let rest = rest.trim_start();
             if let Some(v) = rest.strip_prefix('=') {
@@ -52,12 +67,6 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
                 i += 1;
                 continue;
             }
-        }
-        if let Some(rest) = t.strip_prefix("Dependency:") {
-            pending_dependency = Some(rest.trim().to_string());
-            pending_tool = None;
-            i += 1;
-            continue;
         }
         if let Some(rest) = t.strip_prefix("Secret:") {
             let name = rest.trim();
@@ -72,6 +81,12 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
                 );
             }
             file.secrets.push(name.to_string());
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("Dependency:") {
+            pending_dependency = Some(rest.trim().to_string());
+            pending_tool = None;
             i += 1;
             continue;
         }
@@ -95,13 +110,6 @@ pub fn parse(input: &str) -> Result<BMakeFile> {
             } else {
                 bail!("'Need:' without preceding 'Dependency:' or 'Tool:' at line {}", i + 1);
             }
-            i += 1;
-            continue;
-        }
-        if let Some(rest) = t.strip_prefix("Uses:") {
-            let path = rest.trim().to_string();
-            validate_flow_path(&path)?;
-            file.uses.push(path);
             i += 1;
             continue;
         }
@@ -165,30 +173,6 @@ fn find_version_tag(lines: &[String]) -> Result<(String, usize)> {
     Ok((version, i + 1))
 }
 
-fn validate_flow_path(path: &str) -> Result<()> {
-    if path.is_empty() {
-        bail!("'Uses:' requires a flow path");
-    }
-    if path.starts_with('/') || path.starts_with('\\') {
-        bail!("Invalid Plugin Flow path '{}': absolute paths are not allowed", path);
-    }
-    if path.contains('\0') || path.chars().any(|c| c.is_control()) {
-        bail!("Invalid Plugin Flow path '{}': contains control characters", path);
-    }
-    for part in path.split(['/', '\\']) {
-        if part == ".." || part == "." || part.is_empty() {
-            bail!("Invalid Plugin Flow path '{}': path traversal or empty segment is not allowed", path);
-        }
-    }
-    if path.ends_with(".bm") {
-        bail!(
-            "'Uses:' paths should not include the '.bm' extension — write 'Uses: {}' instead",
-            path.trim_end_matches(".bm")
-        );
-    }
-    Ok(())
-}
-
 fn find_start(lines: &[String], mut i: usize) -> Result<usize> {
     while i < lines.len() && lines[i].trim().is_empty() {
         i += 1;
@@ -203,9 +187,6 @@ fn leading_spaces(line: &str) -> usize {
     line.chars().take_while(|c| *c == ' ').count()
 }
 
-/// Parses the indented body of a `Value:` block into a nested map. This is
-/// the one place in BMake where indentation carries meaning — deliberately
-/// scoped to just this block, not a change to the overall flat grammar.
 fn parse_value_map(lines: &[String], start: usize, parent_indent: usize) -> Result<(BTreeMap<String, ValueNode>, usize)> {
     let mut map = BTreeMap::new();
     let mut i = start;
@@ -277,6 +258,53 @@ fn split_kv(line: &str) -> Option<(String, String)> {
     line.split_once(':').map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
 }
 
+/// Validates a `Uses: <path>` target: relative only, no traversal, no
+/// control characters, no explicit `.bm` suffix (that's implied).
+fn validate_flow_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        bail!("'Uses:' requires a flow path");
+    }
+    if path.starts_with('/') || path.starts_with('\\') {
+        bail!("Invalid Plugin Flow path '{}': absolute paths are not allowed", path);
+    }
+    if path.contains('\0') || path.chars().any(|c| c.is_control()) {
+        bail!("Invalid Plugin Flow path '{}': contains control characters", path);
+    }
+    for part in path.split(['/', '\\']) {
+        if part == ".." || part == "." || part.is_empty() {
+            bail!("Invalid Plugin Flow path '{}': path traversal or empty segment is not allowed", path);
+        }
+    }
+    if path.ends_with(".bm") {
+        bail!(
+            "'Uses:' paths should not include the '.bm' extension — write 'Uses: {}' instead",
+            path.trim_end_matches(".bm")
+        );
+    }
+    Ok(())
+}
+
+/// Validates a `Run-bm: <file>.bm` target: relative only, no traversal, no
+/// control characters. Unlike `Uses:`, the `.bm` extension is expected
+/// (the target is a normal, full BMake project file).
+fn validate_run_bm_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        bail!("'Run-bm:' requires a file path");
+    }
+    if path.starts_with('/') || path.starts_with('\\') {
+        bail!("Invalid Run-bm path '{}': absolute paths are not allowed", path);
+    }
+    if path.contains('\0') || path.chars().any(|c| c.is_control()) {
+        bail!("Invalid Run-bm path '{}': contains control characters", path);
+    }
+    for part in path.split(['/', '\\']) {
+        if part == ".." || part.is_empty() {
+            bail!("Invalid Run-bm path '{}': path traversal is not allowed", path);
+        }
+    }
+    Ok(())
+}
+
 fn parse_task(lines: &[String], start: usize, global_env: &std::collections::HashMap<String, String>) -> Result<(Task, usize)> {
     let header = lines[start].trim();
     let inner = header.trim_start_matches("<Task:").trim_end_matches('>').trim();
@@ -309,6 +337,10 @@ fn parse_task(lines: &[String], start: usize, global_env: &std::collections::Has
                 i + 1
             );
         }
+        if t.starts_with("Run-bm:") {
+            bail!("'Run-bm:' must be declared at global scope, not inside Task '{}' (line {})", task.name, i + 1);
+        }
+
         if let Some(v) = strip_field(t, "Before") {
             task.before.push(v);
             i += 1;
@@ -560,6 +592,9 @@ fn merge_into(target: &mut BMakeFile, other: BMakeFile) {
     target.plugins.extend(other.plugins);
     target.artifacts.extend(other.artifacts);
     target.clean_paths.extend(other.clean_paths);
+    target.secrets.extend(other.secrets);
+    target.uses.extend(other.uses);
+    target.run_bm.extend(other.run_bm);
     for (k, v) in other.env {
         target.env.entry(k).or_insert(v);
     }
@@ -567,12 +602,8 @@ fn merge_into(target: &mut BMakeFile, other: BMakeFile) {
         target.values.entry(k).or_insert(v);
     }
     target.tasks.extend(other.tasks);
-    target.secrets.extend(other.secrets);
-    target.uses.extend(other.uses);
 }
 
-/// Transpiles a `.bm.kts` source file into a runnable Kotlin script that,
-/// when executed, prints the equivalent flattened `.bm` text on stdout.
 pub fn transpile_kts_to_kotlin_script(source: &str) -> String {
     let mut out = String::new();
     for raw_line in source.lines() {
@@ -713,6 +744,62 @@ mod tests {
     #[test]
     fn value_inside_task_is_rejected() {
         let src = "<Version: 1.0>\n\nStart\n\n<Task: Build>\n    Value:\n        X: 1\n    Command: echo hi\n</Task>\n\nStop";
+        let err = parse(src).unwrap_err();
+        assert!(err.to_string().contains("global scope"));
+    }
+
+    #[test]
+    fn uses_directive_parses_valid_path() {
+        let src = "<Version: 1.0>\n\nStart\n\nUses: android/build\n\nStop";
+        let file = parse(src).unwrap();
+        assert_eq!(file.uses, vec!["android/build".to_string()]);
+    }
+
+    #[test]
+    fn uses_rejects_path_traversal() {
+        let src = "<Version: 1.0>\n\nStart\n\nUses: ../../secret\n\nStop";
+        let err = parse(src).unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn uses_rejects_absolute_path() {
+        let src = "<Version: 1.0>\n\nStart\n\nUses: /etc/passwd\n\nStop";
+        let err = parse(src).unwrap_err();
+        assert!(err.to_string().contains("absolute paths"));
+    }
+
+    #[test]
+    fn uses_inside_task_is_rejected() {
+        let src = "<Version: 1.0>\n\nStart\n\n<Task: Build>\n    Uses: android/build\n    Command: echo hi\n</Task>\n\nStop";
+        let err = parse(src).unwrap_err();
+        assert!(err.to_string().contains("global scope"));
+    }
+
+    #[test]
+    fn uses_with_bm_extension_is_rejected() {
+        let src = "<Version: 1.0>\n\nStart\n\nUses: android/build.bm\n\nStop";
+        let err = parse(src).unwrap_err();
+        assert!(err.to_string().contains("should not include"));
+    }
+
+    #[test]
+    fn run_bm_directive_parses_valid_path() {
+        let src = "<Version: 1.0>\n\nStart\n\nRun-bm: deploy.bm\n\nStop";
+        let file = parse(src).unwrap();
+        assert_eq!(file.run_bm, vec!["deploy.bm".to_string()]);
+    }
+
+    #[test]
+    fn run_bm_rejects_path_traversal() {
+        let src = "<Version: 1.0>\n\nStart\n\nRun-bm: ../../deploy.bm\n\nStop";
+        let err = parse(src).unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn run_bm_inside_task_is_rejected() {
+        let src = "<Version: 1.0>\n\nStart\n\n<Task: Build>\n    Run-bm: deploy.bm\n    Command: echo hi\n</Task>\n\nStop";
         let err = parse(src).unwrap_err();
         assert!(err.to_string().contains("global scope"));
     }

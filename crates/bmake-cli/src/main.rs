@@ -1,14 +1,15 @@
-mod ui;
 use anyhow::Result;
 use bmake_engine::{dependency, executor, paths::BMakePaths, plugin, status::BuildStatus, version};
 use clap::{Parser, Subcommand};
 use serde_json::json;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
+
+mod editor_setup;
 mod pager;
 mod syntax_docs;
-mod editor_setup;
+mod ui;
 
 #[derive(Parser)]
 #[command(name = "bmake", version, about = "BMake — universal build orchestration system")]
@@ -19,7 +20,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the build defined in a .bm file
     Run {
         file: Option<PathBuf>,
         #[arg(long)]
@@ -35,82 +35,70 @@ enum Commands {
         #[arg(long)]
         no_animation: bool,
     },
-    /// Create a new BMake.bm (or BMake.bm.kts) in the current directory
     Init {
         #[arg(long)]
         kts: bool,
     },
-    /// Validate a .bm file without running it
-    Check { file: Option<PathBuf> },
-    /// Validate syntax, task graph, dependencies, and Runner config without running
-    Validate { file: Option<PathBuf> },
-    /// List tasks, tools, dependencies, or artifacts without running
-    List { what: Option<String> },
-    /// Show the Task dependency graph
+    Check {
+        file: Option<PathBuf>,
+    },
+    Validate {
+        file: Option<PathBuf>,
+    },
+    List {
+        what: Option<String>,
+    },
     Graph {
         #[arg(long)]
         dot: bool,
     },
-    /// Remove the .bmake/ cache directory
+    Explain {
+        task: String,
+    },
+    Syntax {
+        #[arg(long)]
+        version: Option<String>,
+    },
     Clean {
         #[arg(long)]
         deep: bool,
     },
-    /// Show migration notes between BMake versions
     Migrate,
-    /// Authenticate with the BMake website
     Login,
-    /// Remove stored BMake credentials
     Logout,
-    /// Show the current BMake Engine version
     Version,
-    /// Show the actual local build environment
     Env,
-    /// Show or clear the BMake build cache
     Cache {
         #[command(subcommand)]
         action: Option<CacheAction>,
     },
-    /// Show past build logs
     Logs {
         build_id: Option<String>,
         #[arg(long)]
         last: bool,
     },
-    /// Explain why a Task would run (dependencies, condition, environment, command)
-    Explain { task: String },
-    /// Open the interactive BMake syntax reference
-    Syntax {
-        #[arg(long)]
-        version: Option<String>,
-    },
-    /// Manage BMake Runners
-    Runner {
-        #[command(subcommand)]
-        action: RunnerAction,
-    },
-    /// Add a secret to the local vault (secret.bm.locksys)
     Add {
         #[command(subcommand)]
         what: AddKind,
     },
-    /// Remove a secret from the local vault
     Remove {
         #[command(subcommand)]
         what: RemoveKind,
     },
-    /// Alias group for secret management (same implementation as add/remove)
     Secret {
         #[command(subcommand)]
         action: SecretAction,
     },
+    Runner {
+        #[command(subcommand)]
+        action: RunnerAction,
+    },
 }
 
 #[derive(Subcommand)]
-enum RunnerAction {
-    Register,
-    Start { id: String },
-    Status,
+enum CacheAction {
+    Info,
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -131,14 +119,14 @@ enum SecretAction {
     AddOnline { name: String },
     ListOnline,
     Grant { name: String, runner_id: String },
-    /// List which Runners are granted access to a cloud secret
     ListGrants { name: String },
 }
 
 #[derive(Subcommand)]
-enum CacheAction {
-    Info,
-    Clear,
+enum RunnerAction {
+    Register,
+    Start { id: String },
+    Status,
 }
 
 fn main() {
@@ -152,6 +140,8 @@ fn main() {
         Commands::Validate { file } => cmd_validate(file),
         Commands::List { what } => cmd_list(what),
         Commands::Graph { dot } => cmd_graph(dot),
+        Commands::Explain { task } => cmd_explain(task),
+        Commands::Syntax { version } => pager::run(version.as_deref()),
         Commands::Clean { deep } => cmd_clean(deep),
         Commands::Migrate => cmd_migrate(),
         Commands::Login => cmd_login(),
@@ -160,13 +150,6 @@ fn main() {
         Commands::Env => cmd_env(),
         Commands::Cache { action } => cmd_cache(action),
         Commands::Logs { build_id, last } => cmd_logs(build_id, last),
-        Commands::Explain { task } => cmd_explain(task),
-        Commands::Syntax { version } => pager::run(version.as_deref()),
-        Commands::Runner { action } => match action {
-            RunnerAction::Register => cmd_runner_register(),
-            RunnerAction::Start { id } => cmd_runner_start(&id),
-            RunnerAction::Status => cmd_runner_status(),
-        },
         Commands::Add { what: AddKind::Secret { name } } => cmd_secret_add(&name),
         Commands::Remove { what: RemoveKind::Secret { name } } => cmd_secret_remove(&name),
         Commands::Secret { action } => match action {
@@ -178,39 +161,17 @@ fn main() {
             SecretAction::Grant { name, runner_id } => cmd_secret_grant(&name, &runner_id),
             SecretAction::ListGrants { name } => cmd_secret_list_grants(&name),
         },
+        Commands::Runner { action } => match action {
+            RunnerAction::Register => cmd_runner_register(),
+            RunnerAction::Start { id } => cmd_runner_start(&id),
+            RunnerAction::Status => cmd_runner_status(),
+        },
     };
 
     if let Err(e) = result {
         eprintln!(" BMake Error:\n{:#}", e);
         std::process::exit(1);
     }
-}
-
-/// Materializes every `Uses:` reference into a Task and merges its
-/// Dependency/Tool/Require into the project's own — flows go through the
-/// exact same resolvers, never separate ones. Also guards against a flow
-/// name colliding with a regular Task or another flow.
-fn materialize_uses(bmake_file: &mut bmake_ast::BMakeFile, project_dir: &Path) -> Result<()> {
-    let uses = bmake_file.uses.clone();
-    for flow_path in uses {
-        let flow = bmake_engine::flows::resolve_flow(project_dir, &flow_path)?;
-        let task = bmake_engine::flows::materialize_as_task(&flow);
-        bmake_file.tasks.push(task);
-        bmake_file.dependencies.extend(flow.dependencies);
-        bmake_file.tools.extend(flow.tools);
-        bmake_file.requires.extend(flow.requires);
-    }
-
-    let mut seen = std::collections::HashSet::new();
-    for t in &bmake_file.tasks {
-        if !seen.insert(t.name.as_str()) {
-            anyhow::bail!(
-                "Duplicate Task/Plugin Flow name '{}' — a Task and a Plugin Flow (or two Flows) cannot share the same name.",
-                t.name
-            );
-        }
-    }
-    Ok(())
 }
 
 fn find_bm_file(explicit: Option<PathBuf>) -> Result<PathBuf> {
@@ -257,6 +218,107 @@ fn parse_bm_or_kts(path: &Path) -> Result<bmake_ast::BMakeFile> {
     }
 }
 
+// ---------- Uses: / Run-bm: materialization ----------
+
+fn check_unique_task_names(bmake_file: &bmake_ast::BMakeFile) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for t in &bmake_file.tasks {
+        if !seen.insert(t.name.as_str()) {
+            anyhow::bail!(
+                "Duplicate Task/Plugin Flow name '{}' — a Task and a Plugin Flow (or two Flows) cannot share the same name.",
+                t.name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Materializes every `Uses:` reference into a Task and merges its
+/// Dependency/Tool/Require into the project's own — flows go through the
+/// exact same resolvers, never separate ones.
+fn materialize_uses(bmake_file: &mut bmake_ast::BMakeFile, project_dir: &Path) -> Result<()> {
+    let uses = bmake_file.uses.clone();
+    for flow_path in uses {
+        let flow = bmake_engine::flows::resolve_flow(project_dir, &flow_path)?;
+        let task = bmake_engine::flows::materialize_as_task(&flow);
+        bmake_file.tasks.push(task);
+        bmake_file.dependencies.extend(flow.dependencies);
+        bmake_file.tools.extend(flow.tools);
+        bmake_file.requires.extend(flow.requires);
+    }
+    Ok(())
+}
+
+fn resolve_run_bm_path(bm_path: &Path, target: &str) -> Result<PathBuf> {
+    let base = bm_path.parent().unwrap_or(Path::new("."));
+    Ok(base.join(target))
+}
+
+/// Materializes every `Run-bm:` reference into a Task whose Command
+/// re-invokes this same `bmake` binary as a subprocess on the referenced
+/// file — no second execution engine, just the exact same engine running
+/// again. Circular references are caught via an inherited env var chain
+/// (`BMAKE_RUN_BM_CHAIN`) rather than by guessing ahead of time.
+fn materialize_run_bm(bmake_file: &mut bmake_ast::BMakeFile, bm_path: &Path) -> Result<()> {
+    let entries = bmake_file.run_bm.clone();
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let this_canonical = bm_path.canonicalize().unwrap_or_else(|_| bm_path.to_path_buf());
+    let chain_str = std::env::var("BMAKE_RUN_BM_CHAIN").unwrap_or_default();
+    let chain: Vec<&str> = chain_str.split(':').filter(|s| !s.is_empty()).collect();
+    if chain.iter().any(|p| Path::new(p) == this_canonical) {
+        anyhow::bail!(
+            "Circular Run-bm reference detected:\n\n{} -> {}",
+            chain.join(" -> "),
+            this_canonical.display()
+        );
+    }
+    let new_chain = if chain_str.is_empty() {
+        this_canonical.display().to_string()
+    } else {
+        format!("{}:{}", chain_str, this_canonical.display())
+    };
+
+    let exe = std::env::current_exe()?;
+
+    for target in entries {
+        let resolved = resolve_run_bm_path(bm_path, &target)?;
+        if !resolved.exists() {
+            anyhow::bail!(
+                "BMake Error:\n\nRun-bm file not found:\n\n{}\n\nExpected:\n\n{}",
+                target,
+                resolved.display()
+            );
+        }
+
+        let mut env = HashMap::new();
+        env.insert("BMAKE_RUN_BM_CHAIN".to_string(), new_chain.clone());
+
+        let task = bmake_ast::Task {
+            name: format!("run-bm:{}", target),
+            commands: vec![bmake_ast::CommandStep {
+                command: format!("{} run --force {}", exe.display(), resolved.display()),
+                ..Default::default()
+            }],
+            env,
+            ..Default::default()
+        };
+        bmake_file.tasks.push(task);
+    }
+    Ok(())
+}
+
+fn materialize_flows(bmake_file: &mut bmake_ast::BMakeFile, project_dir: &Path, bm_path: &Path) -> Result<()> {
+    materialize_uses(bmake_file, project_dir)?;
+    materialize_run_bm(bmake_file, bm_path)?;
+    check_unique_task_names(bmake_file)?;
+    Ok(())
+}
+
+// ---------- run ----------
+
 fn cmd_run(
     file: Option<PathBuf>,
     task: Option<String>,
@@ -277,7 +339,8 @@ fn cmd_run(
     }
 
     println!(" BMake {} — {}", bmake_file.version, bm_path.display());
-    materialize_uses(&mut bmake_file, &project_dir)?;
+
+    materialize_flows(&mut bmake_file, &project_dir, &bm_path)?;
 
     if let Some(task_name) = &task {
         if bmake_file.remote.as_deref() == Some("Local") {
@@ -306,9 +369,6 @@ fn cmd_run(
                 bmake_file.arch.as_deref(),
             )?;
             if let Some(runner) = matched {
-                // Ships the raw .bm text as-is — the Runner machine resolves
-                // its own Secret references against its OWN local vault, so
-                // decrypted secret values never leave this machine.
                 let raw_content = std::fs::read_to_string(&bm_path)?;
                 let exit_code = dispatch_cloud_job(&session, &runner, &raw_content)?;
                 std::process::exit(exit_code);
@@ -492,26 +552,6 @@ fn dispatch_cloud_job(session: &bmake_engine::cloud::Session, runner: &serde_jso
     }
 }
 
-fn write_lockfile(file: &bmake_ast::BMakeFile, paths: &BMakePaths) -> Result<()> {
-    let mut lock = bmake_engine::lockfile::Lockfile {
-        engine: version::CURRENT_ENGINE_VERSION.to_string(),
-        environment: format!(
-            "{}{}",
-            file.runs_on.clone().unwrap_or_default(),
-            file.runs_on_version.clone().map(|v| format!(" {}", v)).unwrap_or_default()
-        ),
-        arch: file.arch.clone().unwrap_or_else(|| version::target_arch().to_string()),
-        ..Default::default()
-    };
-    for dep in &file.dependencies {
-        lock.dependency.insert(dep.name.clone(), dep.need.clone());
-    }
-    for tool in &file.tools {
-        lock.tool.insert(tool.name.clone(), tool.need.clone());
-    }
-    bmake_engine::lockfile::write(paths, &lock)
-}
-
 fn resolve_secrets_with_events(
     bmake_file: &bmake_ast::BMakeFile,
     project_dir: &Path,
@@ -541,8 +581,6 @@ fn resolve_secrets_with_events(
 
     let outcome: Result<()> = (|| {
         if remote_ci || is_ci {
-            // Never uploads Local secrets to CI automatically — only reads
-            // whatever the workflow author already exposed as env vars.
             for name in &secret_names {
                 let Ok(value) = std::env::var(name) else {
                     anyhow::bail!(
@@ -593,14 +631,34 @@ fn resolve_secrets_with_events(
     }
 }
 
+fn write_lockfile(file: &bmake_ast::BMakeFile, paths: &BMakePaths) -> Result<()> {
+    let mut lock = bmake_engine::lockfile::Lockfile {
+        engine: version::CURRENT_ENGINE_VERSION.to_string(),
+        environment: format!(
+            "{}{}",
+            file.runs_on.clone().unwrap_or_default(),
+            file.runs_on_version.clone().map(|v| format!(" {}", v)).unwrap_or_default()
+        ),
+        arch: file.arch.clone().unwrap_or_else(|| version::target_arch().to_string()),
+        ..Default::default()
+    };
+    for dep in &file.dependencies {
+        lock.dependency.insert(dep.name.clone(), dep.need.clone());
+    }
+    for tool in &file.tools {
+        lock.tool.insert(tool.name.clone(), tool.need.clone());
+    }
+    bmake_engine::lockfile::write(paths, &lock)
+}
+
+// ---------- init ----------
+
 fn cmd_init(kts: bool) -> Result<()> {
     let filename = if kts { "BMake.bm.kts" } else { "BMake.bm" };
     let path = PathBuf::from(filename);
     if path.exists() {
         anyhow::bail!("{} already exists in this directory", filename);
     }
-    // No trailing newline, no trailing whitespace of any kind after "Stop" —
-    // the file ends exactly at the last byte of "Stop".
     let template = format!(
         "<Version: {}>\n\nStart\n\nLang: Kotlin\nSystem: Gradle\n\n<Task: Build>\n    Command: ./gradlew build\n</Task>\n\nStop",
         version::CURRENT_ENGINE_VERSION
@@ -614,10 +672,14 @@ fn cmd_init(kts: bool) -> Result<()> {
     Ok(())
 }
 
+// ---------- check / validate ----------
+
 fn cmd_check(file: Option<PathBuf>) -> Result<()> {
     let bm_path = find_bm_file(file)?;
-    let bmake_file = parse_bm_or_kts(&bm_path)?;
-    materialize_uses(&mut bmake_file, &project_dir)?;
+    let project_dir = bm_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut bmake_file = parse_bm_or_kts(&bm_path)?;
+    materialize_flows(&mut bmake_file, &project_dir, &bm_path)?;
+
     println!(" {} is valid", bm_path.display());
     println!("   Version : {}", bmake_file.version);
     println!("   Lang    : {:?}", bmake_file.lang);
@@ -643,18 +705,25 @@ fn cmd_validate(file: Option<PathBuf>) -> Result<()> {
     };
     println!("✓ Syntax valid");
 
+    let mut warnings = 0u32;
+
     let project_dir = bm_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    if !bmake_file.uses.is_empty() {
-        match materialize_uses(&mut bmake_file, &project_dir) {
-            Ok(()) => println!("✓ Plugin Flow(s) valid ({})", bmake_file.uses.join(", ")),
+    if !bmake_file.uses.is_empty() || !bmake_file.run_bm.is_empty() {
+        match materialize_flows(&mut bmake_file, &project_dir, &bm_path) {
+            Ok(()) => {
+                if !bmake_file.uses.is_empty() {
+                    println!("✓ Plugin Flow(s) valid ({})", bmake_file.uses.join(", "));
+                }
+                if !bmake_file.run_bm.is_empty() {
+                    println!("✓ Run-bm reference(s) valid ({})", bmake_file.run_bm.join(", "));
+                }
+            }
             Err(e) => {
-                println!("✗ Plugin Flow invalid\n");
+                println!("✗ Plugin Flow / Run-bm invalid\n");
                 return Err(e);
             }
         }
     }
-
-    let mut warnings = 0u32;
 
     match bmake_engine::values::resolve_values_only(&mut bmake_file) {
         Ok(report) => {
@@ -761,9 +830,41 @@ fn cmd_validate(file: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+// ---------- list ----------
+
 fn cmd_list(what: Option<String>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+
+    match what.as_deref() {
+        Some("flows") => {
+            let flows = bmake_engine::flows::discover_flows(&cwd);
+            println!("Available Plugin Flows\n");
+            if flows.is_empty() {
+                println!("  (none found under .bmake/flows/)");
+            }
+            for (path, parsed) in flows {
+                match parsed {
+                    Ok(flow) => {
+                        println!("{}", path);
+                        println!("  {}", flow.name);
+                        println!("  {}\n", flow.description);
+                    }
+                    Err(e) => {
+                        println!("{}", path);
+                        println!("  ⚠ invalid: {}\n", e);
+                    }
+                }
+            }
+            return Ok(());
+        }
+        Some("secrets") => return cmd_secret_list(),
+        _ => {}
+    }
+
     let bm_path = find_bm_file(None)?;
-    let bmake_file = parse_bm_or_kts(&bm_path)?;
+    let project_dir = bm_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut bmake_file = parse_bm_or_kts(&bm_path)?;
+    materialize_flows(&mut bmake_file, &project_dir, &bm_path)?;
 
     match what.as_deref() {
         None | Some("tasks") => {
@@ -790,39 +891,19 @@ fn cmd_list(what: Option<String>) -> Result<()> {
                 println!("  {}", a);
             }
         }
-        Some("secrets") => return cmd_secret_list(),
-        Some("flows") => {
-            let flows = bmake_engine::flows::discover_flows(&std::env::current_dir()?);
-            println!("Available Plugin Flows\n");
-            if flows.is_empty() {
-                println!("  (none found under .bmake/flows/)");
-            }
-            for (path, parsed) in flows {
-                match parsed {
-                    Ok(flow) => {
-                        println!("{}", path);
-                        println!("  {}", flow.name);
-                        println!("  {}\n", flow.description);
-                    }
-                    Err(e) => {
-                        println!("{}", path);
-                        println!("  ⚠ invalid: {}\n", e);
-                    }
-                }
-            }
-        }
-        Some(other) => anyhow::bail!("Unknown 'bmake list {}'. Try: tasks, tools, dependencies, artifacts", other),
+        Some(other) => anyhow::bail!("Unknown 'bmake list {}'. Try: tasks, tools, dependencies, artifacts, flows, secrets", other),
     }
     Ok(())
 }
 
+// ---------- graph ----------
+
 fn cmd_graph(dot: bool) -> Result<()> {
     let bm_path = find_bm_file(None)?;
-    let bmake_file = parse_bm_or_kts(&bm_path)?;
-    materialize_uses(&mut bmake_file, &project_dir)?;
+    let project_dir = bm_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut bmake_file = parse_bm_or_kts(&bm_path)?;
+    materialize_flows(&mut bmake_file, &project_dir, &bm_path)?;
 
-    // Validates first — this is where a circular dependency surfaces with
-    // the exact "A -> B -> C -> A" chain, and it never loops forever.
     bmake_engine::graph::topological_waves(&bmake_file.tasks)?;
 
     if dot {
@@ -867,6 +948,86 @@ fn print_children(name: &str, dependents: &std::collections::HashMap<&str, Vec<&
         }
     }
 }
+
+// ---------- explain ----------
+
+fn cmd_explain(task_name: String) -> Result<()> {
+    let bm_path = find_bm_file(None)?;
+    let project_dir = bm_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut bmake_file = parse_bm_or_kts(&bm_path)?;
+    materialize_flows(&mut bmake_file, &project_dir, &bm_path)?;
+
+    let Some(task) = bmake_file.tasks.iter().find(|t| t.name == task_name) else {
+        anyhow::bail!("Task '{}' not found in {}", task_name, bm_path.display());
+    };
+
+    println!("Task: {}\n", task.name);
+    if let Some(label) = &task.flow_label {
+        println!("Plugin Flow: {}\n", label);
+    }
+
+    if !task.depends_on.is_empty() {
+        println!("Depends-on:");
+        for dep in &task.depends_on {
+            let exists = bmake_file.tasks.iter().any(|t| t.name == *dep);
+            println!("  {} {}", if exists { "✓" } else { "✗" }, dep);
+        }
+        println!();
+    }
+
+    if let Some(cond) = &task.condition {
+        let result = bmake_engine::executor::evaluate_condition(cond, &bmake_file);
+        println!("Condition:");
+        println!("  {}", cond);
+        println!("  Result: {}\n", if result { "TRUE" } else { "FALSE" });
+    }
+
+    if let Some(w) = task.workdir.as_ref().or(bmake_file.workdir.as_ref()) {
+        println!("Workdir:\n  {}\n", w);
+    }
+
+    if let Some(runs_on) = &bmake_file.runs_on {
+        println!(
+            "Runs-on:\n  {} {}\n",
+            runs_on,
+            bmake_file.runs_on_version.clone().unwrap_or_default()
+        );
+    }
+
+    println!("Shell:\n  {}\n", bmake_file.shell.clone().unwrap_or_else(|| "sh (default)".to_string()));
+
+    if !task.commands.is_empty() {
+        println!("Command:");
+        for step in &task.commands {
+            println!("  {}", step.command);
+            if let Some(oe) = &step.on_error {
+                println!("    OnError: {:?}", oe);
+            }
+            if let Some(t) = step.timeout.or(task.timeout) {
+                println!("    Timeout: {}s", t);
+            }
+        }
+        println!();
+    }
+
+    let artifacts: Vec<&String> = task.artifacts.iter().chain(bmake_file.artifacts.iter()).collect();
+    if !artifacts.is_empty() {
+        println!("Artifact:");
+        for a in artifacts {
+            println!("  {}", a);
+        }
+        println!();
+    }
+
+    if !task.inputs.is_empty() || !task.outputs.is_empty() {
+        println!("Input:  {}", task.inputs.join(", "));
+        println!("Output: {}", task.outputs.join(", "));
+    }
+
+    Ok(())
+}
+
+// ---------- clean / cache / logs / env / migrate / login / version ----------
 
 fn cmd_clean(deep: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -1004,6 +1165,80 @@ fn cmd_cache_clear() -> Result<()> {
     Ok(())
 }
 
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[0])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit])
+    }
+}
+
+fn cmd_logs(build_id: Option<String>, last: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let paths = BMakePaths::new(&cwd);
+
+    if let Some(id) = build_id {
+        return show_log(&paths, &id);
+    }
+    if last {
+        let ids = bmake_engine::logstore::list_builds(&paths)?;
+        let Some(id) = ids.last() else {
+            println!(" No builds logged yet.");
+            return Ok(());
+        };
+        return show_log(&paths, id);
+    }
+
+    let ids = bmake_engine::logstore::list_builds(&paths)?;
+    if ids.is_empty() {
+        println!(" No builds logged yet. Run 'bmake run' first.");
+        return Ok(());
+    }
+    println!("BMake Build Logs\n");
+    for id in ids.iter().rev().take(20) {
+        match bmake_engine::logstore::read_meta(&paths, id) {
+            Some(meta) => println!("  {}  {}  {}s  exit {}", id, meta.status, meta.duration_secs, meta.exit_code),
+            None => println!("  {}", id),
+        }
+    }
+    println!("\nUse 'bmake logs <build-id>' or 'bmake logs --last' to view full output.");
+    Ok(())
+}
+
+fn show_log(paths: &BMakePaths, build_id: &str) -> Result<()> {
+    if let Some(meta) = bmake_engine::logstore::read_meta(paths, build_id) {
+        println!("Build ID: {}", build_id);
+        println!("Status: {}", meta.status);
+        println!("Runs-on: {:?} {:?}", meta.runs_on, meta.runs_on_version);
+        println!("Duration: {}s  Exit code: {}", meta.duration_secs, meta.exit_code);
+        println!();
+    } else {
+        println!("Build ID: {} (no metadata found)\n", build_id);
+    }
+    match bmake_engine::logstore::read_log(paths, build_id) {
+        Ok(content) => print!("{}", content),
+        Err(_) => println!(" No log output stored for this build."),
+    }
+    Ok(())
+}
+
+// ---------- secrets ----------
+
+fn prompt(label: &str) -> Result<String> {
+    print!(" {}: ", label);
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
 fn cmd_secret_add(name: &str) -> Result<()> {
     bmake_engine::vault::validate_secret_name(name)?;
     let cwd = std::env::current_dir()?;
@@ -1124,149 +1359,7 @@ fn cmd_secret_list_grants(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_explain(task_name: String) -> Result<()> {
-    let bm_path = find_bm_file(None)?;
-    let bmake_file = parse_bm_or_kts(&bm_path)?;
-    materialize_uses(&mut bmake_file, &project_dir)?;
-
-    let Some(task) = bmake_file.tasks.iter().find(|t| t.name == task_name) else {
-        anyhow::bail!("Task '{}' not found in {}", task_name, bm_path.display());
-    };
-
-    println!("Task: {}\n", task.name);
-
-    if !task.depends_on.is_empty() {
-        println!("Depends-on:");
-        for dep in &task.depends_on {
-            let exists = bmake_file.tasks.iter().any(|t| t.name == *dep);
-            println!("  {} {}", if exists { "✓" } else { "✗" }, dep);
-        }
-        println!();
-    }
-
-    if let Some(cond) = &task.condition {
-        let result = bmake_engine::executor::evaluate_condition(cond, &bmake_file);
-        println!("Condition:");
-        println!("  {}", cond);
-        println!("  Result: {}\n", if result { "TRUE" } else { "FALSE" });
-    }
-
-    if let Some(w) = task.workdir.as_ref().or(bmake_file.workdir.as_ref()) {
-        println!("Workdir:\n  {}\n", w);
-    }
-
-    if let Some(runs_on) = &bmake_file.runs_on {
-        println!(
-            "Runs-on:\n  {} {}\n",
-            runs_on,
-            bmake_file.runs_on_version.clone().unwrap_or_default()
-        );
-    }
-
-    println!("Shell:\n  {}\n", bmake_file.shell.clone().unwrap_or_else(|| "sh (default)".to_string()));
-
-    if !task.commands.is_empty() {
-        println!("Command:");
-        for step in &task.commands {
-            println!("  {}", step.command);
-            if let Some(oe) = &step.on_error {
-                println!("    OnError: {:?}", oe);
-            }
-            if let Some(t) = step.timeout.or(task.timeout) {
-                println!("    Timeout: {}s", t);
-            }
-        }
-        println!();
-    }
-
-    let artifacts: Vec<&String> = task.artifacts.iter().chain(bmake_file.artifacts.iter()).collect();
-    if !artifacts.is_empty() {
-        println!("Artifact:");
-        for a in artifacts {
-            println!("  {}", a);
-        }
-        println!();
-    }
-
-    if !task.inputs.is_empty() || !task.outputs.is_empty() {
-        println!("Input:  {}", task.inputs.join(", "));
-        println!("Output: {}", task.outputs.join(", "));
-    }
-
-    Ok(())
-}
-
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{} {}", bytes, UNITS[0])
-    } else {
-        format!("{:.1} {}", size, UNITS[unit])
-    }
-}
-
-fn cmd_logs(build_id: Option<String>, last: bool) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let paths = BMakePaths::new(&cwd);
-
-    if let Some(id) = build_id {
-        return show_log(&paths, &id);
-    }
-    if last {
-        let ids = bmake_engine::logstore::list_builds(&paths)?;
-        let Some(id) = ids.last() else {
-            println!(" No builds logged yet.");
-            return Ok(());
-        };
-        return show_log(&paths, id);
-    }
-
-    let ids = bmake_engine::logstore::list_builds(&paths)?;
-    if ids.is_empty() {
-        println!(" No builds logged yet. Run 'bmake run' first.");
-        return Ok(());
-    }
-    println!("BMake Build Logs\n");
-    for id in ids.iter().rev().take(20) {
-        match bmake_engine::logstore::read_meta(&paths, id) {
-            Some(meta) => println!("  {}  {}  {}s  exit {}", id, meta.status, meta.duration_secs, meta.exit_code),
-            None => println!("  {}", id),
-        }
-    }
-    println!("\nUse 'bmake logs <build-id>' or 'bmake logs --last' to view full output.");
-    Ok(())
-}
-
-fn show_log(paths: &BMakePaths, build_id: &str) -> Result<()> {
-    if let Some(meta) = bmake_engine::logstore::read_meta(paths, build_id) {
-        println!("Build ID: {}", build_id);
-        println!("Status: {}", meta.status);
-        println!("Runs-on: {:?} {:?}", meta.runs_on, meta.runs_on_version);
-        println!("Duration: {}s  Exit code: {}", meta.duration_secs, meta.exit_code);
-        println!();
-    } else {
-        println!("Build ID: {} (no metadata found)\n", build_id);
-    }
-    match bmake_engine::logstore::read_log(paths, build_id) {
-        Ok(content) => print!("{}", content),
-        Err(_) => println!(" No log output stored for this build."),
-    }
-    Ok(())
-}
-
-fn prompt(label: &str) -> Result<String> {
-    print!(" {}: ", label);
-    std::io::stdout().flush()?;
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
-}
+// ---------- runners ----------
 
 fn cmd_runner_register() -> Result<()> {
     println!(" Register a new BMake Runner");
@@ -1330,7 +1423,7 @@ fn run_claimed_job(session: &bmake_engine::cloud::Session, runner_id: &str, job:
     std::fs::write(&job_file, &bm_content)?;
 
     let exe = std::env::current_exe()?;
-   let mut child = std::process::Command::new(&exe)
+    let mut child = std::process::Command::new(&exe)
         .args(["run", "--force"])
         .arg(&job_file)
         .env("BMAKE_RUNNER_ID", runner_id)

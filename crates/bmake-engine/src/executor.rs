@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 enum TaskResult {
     Success,
     Failed,
+    Timeout,
     Skipped,
 }
 
@@ -47,8 +48,11 @@ pub fn run_all_tasks(
                 match results.lock().unwrap().get(&dep_idx).copied() {
                     Some(TaskResult::Success) => true,
                     // Task-level ContinueOnError overrides global StopOnError
-                    // for whether Tasks depending on THIS failed Task still run.
-                    Some(TaskResult::Failed) => file.tasks[dep_idx].continue_on_error.unwrap_or(!file.stop_on_error),
+                    // for whether Tasks depending on THIS failed/timed-out
+                    // Task still run.
+                    Some(TaskResult::Failed) | Some(TaskResult::Timeout) => {
+                        file.tasks[dep_idx].continue_on_error.unwrap_or(!file.stop_on_error)
+                    }
                     _ => false,
                 }
             });
@@ -94,7 +98,11 @@ pub fn run_all_tasks(
             let run_one = move || {
                 let status = run_task(&file_owned, &task, &project_dir_owned, &paths_owned, &build_id_owned, &events_owned, &secrets_owned)
                     .unwrap_or(BuildStatus::Failed);
-                let r = if status == BuildStatus::Success { TaskResult::Success } else { TaskResult::Failed };
+                let r = match status {
+                    BuildStatus::Success => TaskResult::Success,
+                    BuildStatus::Timeout => TaskResult::Timeout,
+                    _ => TaskResult::Failed,
+                };
                 results_ref.lock().unwrap().insert(idx, r);
             };
 
@@ -121,6 +129,10 @@ pub fn run_all_tasks(
             Some(TaskResult::Failed) => {
                 any_failed = true;
                 "FAILED"
+            }
+            Some(TaskResult::Timeout) => {
+                any_failed = true;
+                "TIMEOUT"
             }
             Some(TaskResult::Skipped) => "SKIPPED",
             None => "NOT RUN",
@@ -205,8 +217,9 @@ pub fn run_task(
 
         if !succeeded {
             let error = last_err.unwrap().to_string();
+            let is_timeout = error == "TIMEOUT";
             emit(events, TaskEvent::TaskFailed { task: task.name.clone(), error, label: task.flow_label.clone() });
-            return Ok(BuildStatus::Failed);
+            return Ok(if is_timeout { BuildStatus::Timeout } else { BuildStatus::Failed });
         }
     }
 
@@ -231,6 +244,10 @@ pub fn run_task(
         }
     }
 
+    // Only Tasks materialized from `Uses:` enforce strict Output
+    // verification — a regular Task's Output: is only used for
+    // incremental-build caching and shouldn't suddenly become a hard
+    // failure for projects that predate this feature.
     if task.flow_label.is_some() {
         for output in &task.outputs {
             if resolve_artifact(project_dir, output).is_none() {
@@ -238,7 +255,7 @@ pub fn run_task(
                     "Plugin Flow completed successfully,\nbut declared output was not produced:\n\n{}",
                     output
                 );
-                emit(events, TaskEvent::TaskFailed { task: task.name.clone(), error: msg.clone(), label: task.flow_label.clone() });
+                emit(events, TaskEvent::TaskFailed { task: task.name.clone(), error: msg, label: task.flow_label.clone() });
                 return Ok(BuildStatus::Failed);
             }
         }
@@ -376,10 +393,6 @@ fn run_shell(
     Ok(())
 }
 
-/// Masks every known secret VALUE (never a Value: value, only actual
-/// resolved Secret.* values) before the line ever reaches a log file, an
-/// event, or the terminal. The child process itself still gets the real
-/// value via its environment — only what we capture/forward gets redacted.
 fn mask_secrets(line: &str, secrets: &HashSet<String>) -> String {
     let mut out = line.to_string();
     for s in secrets {

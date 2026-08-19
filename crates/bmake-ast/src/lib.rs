@@ -1,15 +1,10 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OnError {
     Stop,
     Retry,
-}
-
-#[derive(Debug, Clone)]
-pub enum ValueNode {
-    Scalar(String),
-    Map(std::collections::BTreeMap<String, ValueNode>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -24,33 +19,6 @@ pub struct CommandStep {
 pub struct ToolReq {
     pub name: String,
     pub need: String,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct FlowDef {
-    pub path: String,
-    pub name: String,
-    pub description: String,
-    pub runs_on: Option<String>,
-    pub runs_on_version: Option<String>,
-    pub arch: Option<String>,
-    pub platform: Option<String>,
-    pub shell: Option<String>,
-    pub dependencies: Vec<Dependency>,
-    pub tools: Vec<ToolReq>,
-    pub requires: Vec<String>,
-    pub env: std::collections::HashMap<String, String>,
-    pub workdir: Option<String>,
-    pub inputs: Vec<String>,
-    pub outputs: Vec<String>,
-    pub artifacts: Vec<String>,
-    pub condition: Option<String>,
-    pub continue_on_error: Option<bool>,
-    pub timeout: Option<u64>,
-    pub commands: Vec<CommandStep>,
-    pub before: Vec<String>,
-    pub after: Vec<String>,
-    pub renames: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -76,10 +44,11 @@ pub struct Task {
     pub timeout: Option<u64>,
     pub continue_on_error: Option<bool>,
     /// Set only for Tasks materialized from `Uses:` — the flow's `Name:`,
-    /// used by the UI to print "Uses: <path>" / friendly name instead of
-    /// the raw path, and by the executor to gate strict Output verification
-    /// (only flows enforce it, to avoid breaking existing Task Output:
-    /// declarations that are only used for incremental-build caching).
+    /// used by the UI to print "Uses: <path>" / "Running: <name>" instead
+    /// of the raw path, and by the executor to gate strict Output
+    /// verification (only flows enforce it, so existing Task Output:
+    /// declarations used purely for incremental-build caching aren't
+    /// suddenly turned into hard failures).
     pub flow_label: Option<String>,
 }
 
@@ -94,6 +63,43 @@ impl Default for LogLevel {
     fn default() -> Self {
         LogLevel::Normal
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ValueNode {
+    Scalar(String),
+    Map(BTreeMap<String, ValueNode>),
+}
+
+/// A parsed Plugin Flow (`.bmake/flows/<path>.bm`) — not part of
+/// `BMakeFile`; it's parsed separately and then materialized into a
+/// regular `Task` (see `bmake-engine::flows::materialize_as_task`) so it
+/// goes through the exact same graph/executor as everything else.
+#[derive(Debug, Clone, Default)]
+pub struct FlowDef {
+    pub path: String,
+    pub name: String,
+    pub description: String,
+    pub runs_on: Option<String>,
+    pub runs_on_version: Option<String>,
+    pub arch: Option<String>,
+    pub platform: Option<String>,
+    pub shell: Option<String>,
+    pub dependencies: Vec<Dependency>,
+    pub tools: Vec<ToolReq>,
+    pub requires: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub workdir: Option<String>,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    pub artifacts: Vec<String>,
+    pub condition: Option<String>,
+    pub continue_on_error: Option<bool>,
+    pub timeout: Option<u64>,
+    pub commands: Vec<CommandStep>,
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+    pub renames: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,9 +131,15 @@ pub struct BMakeFile {
     pub stop_on_error: bool,
     pub log_level: LogLevel,
     pub tasks: Vec<Task>,
-    pub values: std::collections::BTreeMap<String, ValueNode>,
+    pub values: BTreeMap<String, ValueNode>,
     pub secrets: Vec<String>,
+    /// `Uses: <flow-path>` references, resolved and materialized into
+    /// `tasks` before execution — see `bmake-engine::flows`.
     pub uses: Vec<String>,
+    /// `Run-bm: <file>.bm` references, materialized into `tasks` as a
+    /// self-recursive `bmake run` subprocess — see
+    /// `main::materialize_run_bm`.
+    pub run_bm: Vec<String>,
 }
 
 impl Default for BMakeFile {
@@ -160,9 +172,10 @@ impl Default for BMakeFile {
             stop_on_error: true,
             log_level: LogLevel::Normal,
             tasks: Vec::new(),
-            values: std::collections::BTreeMap::new(),
+            values: BTreeMap::new(),
             secrets: Vec::new(),
             uses: Vec::new(),
+            run_bm: Vec::new(),
         }
     }
 }
