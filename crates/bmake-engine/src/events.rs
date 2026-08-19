@@ -8,14 +8,17 @@ pub enum OutputStream {
 
 #[derive(Debug, Clone)]
 pub enum TaskEvent {
-    TaskStarted { task: String },
+    TaskStarted { task: String, label: Option<String> },
     TaskSkipped { task: String, reason: String },
     CommandStarted { task: String, command: String },
     CommandOutput { task: String, stream: OutputStream, line: String },
     CommandRetry { task: String, attempt: u32, max_attempts: u32, error: String },
     TaskInfo { task: String, message: String },
-    TaskSucceeded { task: String },
-    TaskFailed { task: String, error: String },
+    TaskSucceeded { task: String, label: Option<String> },
+    /// `label` is only set for Tasks materialized from `Uses:` — the
+    /// Plugin Flow's `Name:`, so the UI can print "Uses: <path>" /
+    /// "Running: <name>" instead of the raw Task name.
+    TaskFailed { task: String, error: String, label: Option<String> },
     BuildFinished { results: Vec<(String, String)> },
     /// `source` is always a safe label ("secret.bm.locksys", "BMake Secret
     /// Store", "CI secret store") — never a value. `error` on
