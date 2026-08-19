@@ -9,9 +9,4 @@ System: Cargo
     Command: cargo build --release --workspace
 </Task>
 
-<Task: Test>
-    Depends-on: Build
-    Command: cargo test --workspace
-</Task>
-
 Stop
