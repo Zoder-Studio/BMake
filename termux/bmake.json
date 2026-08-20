@@ -1,0 +1,17 @@
+{
+  "name": "bmake",
+  "version": "1.0.0",
+  "arch": "aarch64",
+  "maintainer": "@hastagaming",
+  "short_description": "Universal build orchestration engine",
+  "long_description": "BMake is a universal build orchestration system for Kotlin, Java, C, C++, Rust, Go, TypeScript, and more. It orchestrates existing build systems (Gradle, Make, CMake, Cargo) instead of replacing them.",
+  "homepage": "https://github.com/Zoder-Studio/BMake",
+  "depends": "libc++, openssl",
+  "files": {
+    "target/release/bmake": "bin/bmake",
+    "editors/nvim/syntax/bmake.vim": "share/bmake/nvim/syntax/bmake.vim",
+    "editors/nvim/syntax/bmake_kts.vim": "share/bmake/nvim/syntax/bmake_kts.vim",
+    "editors/nvim/ftdetect/bmake.vim": "share/bmake/nvim/ftdetect/bmake.vim",
+    "editors/nano/bmake.nanorc": "share/bmake/nano/bmake.nanorc"
+  }
+}
