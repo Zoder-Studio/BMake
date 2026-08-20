@@ -195,6 +195,12 @@ fn flow_resolves_secret_from_local_vault() {
 
     bmake()
         .current_dir(dir.path())
+        // CI runners (including the one running this very test) set these
+        // automatically, which would otherwise route secret resolution to
+        // the CI-secret-store path instead of the local vault this test is
+        // actually exercising.
+        .env_remove("CI")
+        .env_remove("GITHUB_ACTIONS")
         .args(["run", "--no-color", "--no-animation"])
         .write_stdin("test-pass\n")
         .assert()
