@@ -1,6 +1,7 @@
 use crate::{parse_multiline_command, strip_field};
 use anyhow::{bail, Result};
 use bmake_ast::*;
+use crate::parse;
 
 /// Parses a Plugin Flow file's body: a flat directive list (no
 /// `<Version:>`, `Start`/`Stop`, or `<Task:>` wrapper — a flow IS the
