@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: cargo test --workspace
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: bmake-linux-x86_64
+            bin: bmake
+          - os: macos-latest
+            artifact: bmake-macos-arm64
+            bin: bmake
+          - os: windows-latest
+            artifact: bmake-windows-x86_64.exe
+            bin: bmake.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build --release --manifest-path crates/bmake-cli/Cargo.toml
+
+      - name: Package binary (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/${{ matrix.bin }} dist/${{ matrix.artifact }}
+          chmod +x dist/${{ matrix.artifact }}
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\${{ matrix.bin }} dist\${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Compute checksums
+        working-directory: dist
+        run: sha256sum * > checksums.txt
+
+      - name: Extract changelog section (falls back to a generic note)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="$VERSION" '
+              BEGIN{found=0}
+              /^## / { if (found) exit; if ($0 ~ ver) found=1; next }
+              found { print }
+            ' CHANGELOG.md > /tmp/release-notes.md
+          fi
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "BMake ${GITHUB_REF_NAME}" > /tmp/release-notes.md
+            echo "" >> /tmp/release-notes.md
+            echo "See commit history for changes in this release." >> /tmp/release-notes.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: BMake ${{ github.ref_name }}
+          body_path: /tmp/release-notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/bmake-linux-x86_64
+            dist/bmake-macos-arm64
+            dist/bmake-windows-x86_64.exe
+            dist/checksums.txt
+
+  update-termux-packaging:
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hash the exact archive termux/build.sh points to
+        id: hash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          URL="https://codeload.github.com/${{ github.repository }}/tar.gz/refs/tags/${{ github.ref_name }}"
+          SHA256=$(curl -fsSL "$URL" | sha256sum | awk '{print $1}')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Update TERMUX_PKG_VERSION / TERMUX_PKG_SHA256 in build.sh files
+        run: |
+          shopt -s nullglob
+          for f in packages/bmake/build.sh tur/*/bmake/build.sh; do
+            sed -i \
+              -e "s/^TERMUX_PKG_VERSION=.*/TERMUX_PKG_VERSION=${{ steps.hash.outputs.version }}/" \
+              -e "s/^TERMUX_PKG_SHA256=.*/TERMUX_PKG_SHA256=${{ steps.hash.outputs.sha256 }}/" \
+              "$f"
+          done
+          if [ -f termux/bmake.json ]; then
+            jq --arg v "${{ steps.hash.outputs.version }}" '.version = $v' termux/bmake.json > termux/bmake.json.tmp
+            mv termux/bmake.json.tmp termux/bmake.json
+          fi
+
+      - name: Commit updated packaging metadata
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          shopt -s nullglob
+          git add packages/bmake/build.sh tur/*/bmake/build.sh termux/bmake.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update Termux packaging metadata for ${{ github.ref_name }}"
+            git push origin HEAD:main
+          else
+            echo "No packages/bmake or tur/*/bmake build.sh found yet — nothing to update."
+          fi

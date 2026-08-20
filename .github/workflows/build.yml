@@ -1,10 +1,6 @@
 name: Build with BMake
 
 on:
-  workflow_run:
-    workflows: ["Build with BMake"]
-    types:
-      - completed
   workflow_dispatch:
   push:
     branches: [main]
@@ -12,15 +8,7 @@ on:
 
 jobs:
   build:
-    name: build BMake
     runs-on: ubuntu-latest
-    permissions:
-      content: write
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main')
-
     steps:
       - uses: actions/checkout@v4
       - uses: Zoder-Studio/BMake@main
