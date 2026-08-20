@@ -1054,6 +1054,7 @@ fn cmd_clean(deep: bool) -> Result<()> {
             std::fs::remove_dir_all(&d)?;
             println!(" Cleaned: {}", d.display());
         }
+        std::fs::create_dir_all(&d)?;
     }
 
     if deep {
@@ -1065,9 +1066,10 @@ fn cmd_clean(deep: bool) -> Result<()> {
         }
     } else {
         println!(" Kept .bmake/engines/ and .bmake/dependencies/ (use 'bmake clean --deep' to remove them)");
+        std::fs::create_dir_all(paths.engines())?;
+        std::fs::create_dir_all(paths.dependencies())?;
     }
 
-    paths.ensure_all()?;
     Ok(())
 }
 
